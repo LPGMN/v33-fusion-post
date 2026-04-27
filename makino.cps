@@ -138,6 +138,21 @@ properties = {
     value: "-1",
     scope: "post"
   },
+  machiningMode: {
+    title      : "Machining mode",
+    description: "Selects the Makino machining mode M-code output per operation. M251=High Efficiency/High Performance (roughing), M250=High Accuracy/General (machine default on power-on or reset), M252=Super-High Accuracy (finishing). 'Automatic' selects based on stock-to-leave per operation.",
+    group      : "preferences",
+    type       : "enum",
+    values     : [
+      {title:"Off (no output)", id:"off"},
+      {title:"M250 - High Accuracy (machine default)", id:"250"},
+      {title:"M251 - High Efficiency / High Performance", id:"251"},
+      {title:"M252 - Super-High Accuracy", id:"252"},
+      {title:"Automatic (by operation type)", id:"auto"}
+    ],
+    value: "off",
+    scope: "post"
+  },
   usePitchForTapping: {
     title      : "Use pitch for tapping",
     description: "Enables the use of pitch instead of feed for the F-word in canned tapping cycles. Your CNC control must be setup for pitch mode!",
@@ -551,6 +566,8 @@ function onSection() {
   setProbeAngle(); // output probe angle rotations if required
 
   setCoolant(tool.coolant); // writes the required coolant codes
+
+  setMachiningMode(); // writes M250/M251/M252 if enabled
 
   setSmoothing(smoothing.isAllowed); // writes the required smoothing codes
 
@@ -1705,6 +1722,38 @@ function getCoolantCodes(coolant, format) {
   return undefined;
 }
 // <<<<< INCLUDED FROM include_files/coolant.cpi
+// Makino machining mode (M250/M251/M252)
+var currentMachiningMode = -1; // -1 = unknown/unset; forces output on first operation
+
+function setMachiningMode() {
+  var modeProp = getProperty("machiningMode");
+  if (modeProp == "off") {
+    return;
+  }
+
+  var mCode;
+  if (modeProp == "auto") {
+    var thresholdRoughing  = toPreciseUnit(0.5, MM);
+    var thresholdFinishing = toPreciseUnit(0.05, MM);
+    var stockToLeave         = xyzFormat.getResultingValue(getParameter("operation:stockToLeave", getParameter("operation:verticalStockToLeave", 0)));
+    var verticalStockToLeave = xyzFormat.getResultingValue(getParameter("operation:verticalStockToLeave", stockToLeave));
+    if (((stockToLeave >= thresholdRoughing) && (verticalStockToLeave >= thresholdRoughing)) || getParameter("operation:strategy", "") == "face") {
+      mCode = 251; // High Efficiency / High Performance - roughing
+    } else if ((stockToLeave <= thresholdFinishing) && (verticalStockToLeave <= thresholdFinishing)) {
+      mCode = 252; // Super-High Accuracy - finishing
+    } else {
+      mCode = 250; // High Accuracy - semi-finishing / general
+    }
+  } else {
+    mCode = parseInt(modeProp, 10);
+  }
+
+  if (mCode != currentMachiningMode) {
+    writeBlock(mFormat.format(mCode));
+    currentMachiningMode = mCode;
+  }
+}
+
 // >>>>> INCLUDED FROM include_files/smoothing.cpi
 // collected state below, do not edit
 validate(settings.smoothing, "Setting 'smoothing' is required but not defined.");

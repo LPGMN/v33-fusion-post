@@ -10,7 +10,7 @@
   FORKID {97D024CD-3FC3-4161-8BA2-06EA3E072945}
 */
 
-description = "Makino V33 3-axis V1.2";
+description = "Makino V33 3-axis V1.3";
 vendor = "Makino";
 vendorUrl = "https://www.makino.com/";
 legal = "Copyright (C) 2012-2026 by Autodesk, Inc.";

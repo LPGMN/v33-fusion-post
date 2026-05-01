@@ -581,7 +581,7 @@ function onSection() {
   if (isProbeOperation()) {
     validate(probeVariables.probeAngleMethod != "G68", "You cannot probe while G68 Rotation is in effect.");
     validate(probeVariables.probeAngleMethod != "G54.4", "You cannot probe while workpiece setting error compensation G54.4 is enabled.");
-    writeBlock(settings.probing.macroCall, "P" + 9832); // spin the probe on
+    // G170 activates the probe internally — no separate probe-start macro needed
     inspectionCreateResultsFileHeader();
   } else if (isInspectionOperation() && (typeof inspectionProcessSectionStart == "function")) {
     inspectionProcessSectionStart();
@@ -631,7 +631,7 @@ function onCycleEnd() {
   if (isProbeOperation()) {
     zOutput.reset();
     gMotionModal.reset();
-    writeBlock(settings.probing.macroCall, "P" + 9810, zOutput.format(cycle.retract)); // protected retract move
+    writeBlock(gMotionModal.format(0), zOutput.format(cycle.retract)); // retract after probe cycle
   } else {
     if (subprogramsAreSupported() && subprogramState.cycleSubprogramIsActive) {
       subprogramEnd();
@@ -732,7 +732,7 @@ function onSectionEnd() {
     subprogramEnd();
   }
   if (isProbeOperation()) {
-    writeBlock(settings.probing.macroCall, "P" + 9833); // spin the probe off
+    // G170 deactivates the probe internally — no separate probe-end macro needed
     if (probeVariables.probeAngleMethod != "G68") {
       setProbeAngle(); // output probe angle rotations if required
     }
@@ -3386,345 +3386,153 @@ function writeProbeCycle(cycle, x, y, z, P, F) {
     protectedProbeMove(cycle, x, y, z);
   }
 
-  var macroCall = settings.probing.macroCall;
   switch (cycleType) {
+  // ── Single surface ──────────────────────────────────────────────────────────
   case "probing-x":
     protectedProbeMove(cycle, x, y, z - cycle.depth);
-    writeBlock(
-      macroCall, "P" + 9811,
-      "X" + xyzFormat.format(x + approach(cycle.approach1) * (cycle.probeClearance + tool.diameter / 2)),
-      "Q" + xyzFormat.format(cycle.probeOvertravel),
-      getProbingArguments(cycle, true)
-    );
+    writeBlock("G170", "X" + xyzFormat.format(0), getMakinoWCS());
     break;
   case "probing-y":
     protectedProbeMove(cycle, x, y, z - cycle.depth);
-    writeBlock(
-      macroCall, "P" + 9811,
-      "Y" + xyzFormat.format(y + approach(cycle.approach1) * (cycle.probeClearance + tool.diameter / 2)),
-      "Q" + xyzFormat.format(cycle.probeOvertravel),
-      getProbingArguments(cycle, true)
-    );
+    writeBlock("G170", "Y" + xyzFormat.format(0), getMakinoWCS());
     break;
   case "probing-z":
     protectedProbeMove(cycle, x, y, Math.min(z - cycle.depth + cycle.probeClearance, cycle.retract));
-    writeBlock(
-      macroCall, "P" + 9811,
-      "Z" + xyzFormat.format(z - cycle.depth),
-      "Q" + xyzFormat.format(cycle.probeOvertravel),
-      getProbingArguments(cycle, true)
-    );
+    writeBlock("G170", "Z" + xyzFormat.format(0), getMakinoWCS());
     break;
+  // ── Webs (external walls) ───────────────────────────────────────────────────
   case "probing-x-wall":
     protectedProbeMove(cycle, x, y, z);
-    writeBlock(
-      macroCall, "P" + 9812,
-      "X" + xyzFormat.format(cycle.width1),
-      zOutput.format(z - cycle.depth),
-      "Q" + xyzFormat.format(cycle.probeOvertravel),
-      "R" + xyzFormat.format(cycle.probeClearance),
-      getProbingArguments(cycle, true)
-    );
+    writeBlock("G170", "X" + xyzFormat.format(cycle.width1), "Z" + xyzFormat.format(-cycle.depth), getMakinoWCS());
     break;
   case "probing-y-wall":
     protectedProbeMove(cycle, x, y, z);
-    writeBlock(
-      macroCall, "P" + 9812,
-      "Y" + xyzFormat.format(cycle.width1),
-      zOutput.format(z - cycle.depth),
-      "Q" + xyzFormat.format(cycle.probeOvertravel),
-      "R" + xyzFormat.format(cycle.probeClearance),
-      getProbingArguments(cycle, true)
-    );
+    writeBlock("G170", "Y" + xyzFormat.format(cycle.width1), "Z" + xyzFormat.format(-cycle.depth), getMakinoWCS());
     break;
+  // ── Pockets (internal walls) ────────────────────────────────────────────────
   case "probing-x-channel":
     protectedProbeMove(cycle, x, y, z - cycle.depth);
-    writeBlock(
-      macroCall, "P" + 9812,
-      "X" + xyzFormat.format(cycle.width1),
-      "Q" + xyzFormat.format(cycle.probeOvertravel),
-      // not required "R" + xyzFormat.format(cycle.probeClearance),
-      getProbingArguments(cycle, true)
-    );
+    writeBlock("G170", "X" + xyzFormat.format(cycle.width1), getMakinoWCS());
     break;
   case "probing-x-channel-with-island":
     protectedProbeMove(cycle, x, y, z);
-    writeBlock(
-      macroCall, "P" + 9812,
-      "X" + xyzFormat.format(cycle.width1),
-      zOutput.format(z - cycle.depth),
-      "Q" + xyzFormat.format(cycle.probeOvertravel),
-      "R" + xyzFormat.format(-cycle.probeClearance),
-      getProbingArguments(cycle, true)
-    );
+    writeBlock("G170", "X" + xyzFormat.format(cycle.width1), "Z" + xyzFormat.format(-cycle.depth), getMakinoWCS());
     break;
   case "probing-y-channel":
     protectedProbeMove(cycle, x, y, z - cycle.depth);
-    writeBlock(
-      macroCall, "P" + 9812,
-      "Y" + xyzFormat.format(cycle.width1),
-      "Q" + xyzFormat.format(cycle.probeOvertravel),
-      // not required "R" + xyzFormat.format(cycle.probeClearance),
-      getProbingArguments(cycle, true)
-    );
+    writeBlock("G170", "Y" + xyzFormat.format(cycle.width1), getMakinoWCS());
     break;
   case "probing-y-channel-with-island":
     protectedProbeMove(cycle, x, y, z);
-    writeBlock(
-      macroCall, "P" + 9812,
-      "Y" + xyzFormat.format(cycle.width1),
-      zOutput.format(z - cycle.depth),
-      "Q" + xyzFormat.format(cycle.probeOvertravel),
-      "R" + xyzFormat.format(-cycle.probeClearance),
-      getProbingArguments(cycle, true)
-    );
+    writeBlock("G170", "Y" + xyzFormat.format(cycle.width1), "Z" + xyzFormat.format(-cycle.depth), getMakinoWCS());
     break;
+  // ── Bosses ──────────────────────────────────────────────────────────────────
   case "probing-xy-circular-boss":
     protectedProbeMove(cycle, x, y, z);
-    writeBlock(
-      macroCall, "P" + 9814,
-      "D" + xyzFormat.format(cycle.width1),
-      "Z" + xyzFormat.format(z - cycle.depth),
-      "Q" + xyzFormat.format(cycle.probeOvertravel),
-      "R" + xyzFormat.format(cycle.probeClearance),
-      getProbingArguments(cycle, true)
-    );
+    writeBlock("G170", "D" + xyzFormat.format(cycle.width1), "Z" + xyzFormat.format(-cycle.depth), getMakinoWCS());
     break;
   case "probing-xy-circular-partial-boss":
     protectedProbeMove(cycle, x, y, z);
-    writeBlock(
-      macroCall, "P" + 9823,
+    writeBlock("G170",
+      "D" + xyzFormat.format(cycle.width1),
       "A" + xyzFormat.format(cycle.partialCircleAngleA),
       "B" + xyzFormat.format(cycle.partialCircleAngleB),
       "C" + xyzFormat.format(cycle.partialCircleAngleC),
-      "D" + xyzFormat.format(cycle.width1),
-      "Z" + xyzFormat.format(z - cycle.depth),
-      "Q" + xyzFormat.format(cycle.probeOvertravel),
-      "R" + xyzFormat.format(cycle.probeClearance),
-      getProbingArguments(cycle, true)
+      "Z" + xyzFormat.format(-cycle.depth),
+      getMakinoWCS()
     );
     break;
+  // ── Bores ───────────────────────────────────────────────────────────────────
   case "probing-xy-circular-hole":
     protectedProbeMove(cycle, x, y, z - cycle.depth);
-    writeBlock(
-      macroCall, "P" + 9814,
-      "D" + xyzFormat.format(cycle.width1),
-      "Q" + xyzFormat.format(cycle.probeOvertravel),
-      // not required "R" + xyzFormat.format(cycle.probeClearance),
-      getProbingArguments(cycle, true)
-    );
+    writeBlock("G170", "D" + xyzFormat.format(cycle.width1), getMakinoWCS());
     break;
   case "probing-xy-circular-partial-hole":
     protectedProbeMove(cycle, x, y, z - cycle.depth);
-    writeBlock(
-      macroCall, "P" + 9823,
+    writeBlock("G170",
+      "D" + xyzFormat.format(cycle.width1),
       "A" + xyzFormat.format(cycle.partialCircleAngleA),
       "B" + xyzFormat.format(cycle.partialCircleAngleB),
       "C" + xyzFormat.format(cycle.partialCircleAngleC),
-      "D" + xyzFormat.format(cycle.width1),
-      "Q" + xyzFormat.format(cycle.probeOvertravel),
-      getProbingArguments(cycle, true)
+      getMakinoWCS()
     );
     break;
   case "probing-xy-circular-hole-with-island":
     protectedProbeMove(cycle, x, y, z);
-    writeBlock(
-      macroCall, "P" + 9814,
-      "Z" + xyzFormat.format(z - cycle.depth),
-      "D" + xyzFormat.format(cycle.width1),
-      "Q" + xyzFormat.format(cycle.probeOvertravel),
-      "R" + xyzFormat.format(-cycle.probeClearance),
-      getProbingArguments(cycle, true)
-    );
+    writeBlock("G170", "D" + xyzFormat.format(cycle.width1), "Z" + xyzFormat.format(-cycle.depth), getMakinoWCS());
     break;
   case "probing-xy-circular-partial-hole-with-island":
     protectedProbeMove(cycle, x, y, z);
-    writeBlock(
-      macroCall, "P" + 9823,
-      "Z" + xyzFormat.format(z - cycle.depth),
+    writeBlock("G170",
+      "D" + xyzFormat.format(cycle.width1),
       "A" + xyzFormat.format(cycle.partialCircleAngleA),
       "B" + xyzFormat.format(cycle.partialCircleAngleB),
       "C" + xyzFormat.format(cycle.partialCircleAngleC),
-      "D" + xyzFormat.format(cycle.width1),
-      "Q" + xyzFormat.format(cycle.probeOvertravel),
-      "R" + xyzFormat.format(-cycle.probeClearance),
-      getProbingArguments(cycle, true)
+      "Z" + xyzFormat.format(-cycle.depth),
+      getMakinoWCS()
     );
     break;
+  // ── Center blocks / rectangular pockets/bosses ──────────────────────────────
   case "probing-xy-rectangular-hole":
     protectedProbeMove(cycle, x, y, z - cycle.depth);
-    writeBlock(
-      macroCall, "P" + 9812,
-      "X" + xyzFormat.format(cycle.width1),
-      "Q" + xyzFormat.format(cycle.probeOvertravel),
-      // not required "R" + xyzFormat.format(-cycle.probeClearance),
-      getProbingArguments(cycle, true)
-    );
+    writeBlock("G170", "X" + xyzFormat.format(cycle.width1), "Y" + xyzFormat.format(cycle.width2), getMakinoWCS());
     if (getProperty("useLiveConnection") && (typeof liveConnectionStoreResults == "function")) {
       liveConnectionStoreResults();
     }
-    writeBlock(
-      macroCall, "P" + 9812,
-      "Y" + xyzFormat.format(cycle.width2),
-      "Q" + xyzFormat.format(cycle.probeOvertravel),
-      // not required "R" + xyzFormat.format(-cycle.probeClearance),
-      getProbingArguments(cycle, true)
-    );
     break;
   case "probing-xy-rectangular-boss":
     protectedProbeMove(cycle, x, y, z);
-    writeBlock(
-      macroCall, "P" + 9812,
-      "Z" + xyzFormat.format(z - cycle.depth),
+    writeBlock("G170",
       "X" + xyzFormat.format(cycle.width1),
-      "R" + xyzFormat.format(cycle.probeClearance),
-      "Q" + xyzFormat.format(cycle.probeOvertravel),
-      getProbingArguments(cycle, true)
+      "Y" + xyzFormat.format(cycle.width2),
+      "Z" + xyzFormat.format(-cycle.depth),
+      getMakinoWCS()
     );
     if (getProperty("useLiveConnection") && (typeof liveConnectionStoreResults == "function")) {
       liveConnectionStoreResults();
     }
-    writeBlock(
-      macroCall, "P" + 9812,
-      "Z" + xyzFormat.format(z - cycle.depth),
-      "Y" + xyzFormat.format(cycle.width2),
-      "R" + xyzFormat.format(cycle.probeClearance),
-      "Q" + xyzFormat.format(cycle.probeOvertravel),
-      getProbingArguments(cycle, true)
-    );
     break;
   case "probing-xy-rectangular-hole-with-island":
     protectedProbeMove(cycle, x, y, z);
-    writeBlock(
-      macroCall, "P" + 9812,
-      "Z" + xyzFormat.format(z - cycle.depth),
+    writeBlock("G170",
       "X" + xyzFormat.format(cycle.width1),
-      "Q" + xyzFormat.format(cycle.probeOvertravel),
-      "R" + xyzFormat.format(-cycle.probeClearance),
-      getProbingArguments(cycle, true)
+      "Y" + xyzFormat.format(cycle.width2),
+      "Z" + xyzFormat.format(-cycle.depth),
+      getMakinoWCS()
     );
     if (getProperty("useLiveConnection") && (typeof liveConnectionStoreResults == "function")) {
       liveConnectionStoreResults();
     }
-    writeBlock(
-      macroCall, "P" + 9812,
-      "Z" + xyzFormat.format(z - cycle.depth),
-      "Y" + xyzFormat.format(cycle.width2),
-      "Q" + xyzFormat.format(cycle.probeOvertravel),
-      "R" + xyzFormat.format(-cycle.probeClearance),
-      getProbingArguments(cycle, true)
-    );
     break;
+  // ── Corners ─────────────────────────────────────────────────────────────────
   case "probing-xy-inner-corner":
-    var cornerX = x + approach(cycle.approach1) * (cycle.probeClearance + tool.diameter / 2);
-    var cornerY = y + approach(cycle.approach2) * (cycle.probeClearance + tool.diameter / 2);
-    var cornerI = 0;
-    var cornerJ = 0;
-    if (cycle.probeSpacing !== undefined) {
-      cornerI = cycle.probeSpacing;
-      cornerJ = cycle.probeSpacing;
-    }
-    if ((cornerI != 0) && (cornerJ != 0)) {
-      if (currentSection.strategy == "probe") {
-        setProbeAngleMethod();
-      }
-    }
+    var cornerI = cycle.probeSpacing !== undefined ? cycle.probeSpacing : 0;
+    var cornerJ = cycle.probeSpacing !== undefined ? cycle.probeSpacing : 0;
     protectedProbeMove(cycle, x, y, z - cycle.depth);
-    writeBlock(
-      macroCall, "P" + 9815, xOutput.format(cornerX), yOutput.format(cornerY),
-      conditional(cornerI != 0, "I" + xyzFormat.format(cornerI)),
-      conditional(cornerJ != 0, "J" + xyzFormat.format(cornerJ)),
-      "Q" + xyzFormat.format(cycle.probeOvertravel),
-      getProbingArguments(cycle, true)
+    writeBlock("G170",
+      "B" + xyzFormat.format(getMakinoCorner(cycle.approach1, cycle.approach2)),
+      conditional(cornerI != 0, "X" + xyzFormat.format(cornerI)),
+      conditional(cornerJ != 0, "Y" + xyzFormat.format(cornerJ)),
+      getMakinoWCS()
     );
     break;
   case "probing-xy-outer-corner":
-    var cornerX = x + approach(cycle.approach1) * (cycle.probeClearance + tool.diameter / 2);
-    var cornerY = y + approach(cycle.approach2) * (cycle.probeClearance + tool.diameter / 2);
-    var cornerI = 0;
-    var cornerJ = 0;
-    if (cycle.probeSpacing !== undefined) {
-      cornerI = cycle.probeSpacing;
-      cornerJ = cycle.probeSpacing;
-    }
-    if ((cornerI != 0) && (cornerJ != 0)) {
-      if (currentSection.strategy == "probe") {
-        setProbeAngleMethod();
-      }
-    }
+    var cornerI = cycle.probeSpacing !== undefined ? cycle.probeSpacing : 0;
+    var cornerJ = cycle.probeSpacing !== undefined ? cycle.probeSpacing : 0;
     protectedProbeMove(cycle, x, y, z - cycle.depth);
-    writeBlock(
-      macroCall, "P" + 9816, xOutput.format(cornerX), yOutput.format(cornerY),
-      conditional(cornerI != 0, "I" + xyzFormat.format(cornerI)),
-      conditional(cornerJ != 0, "J" + xyzFormat.format(cornerJ)),
-      "Q" + xyzFormat.format(cycle.probeOvertravel),
-      getProbingArguments(cycle, true)
+    writeBlock("G170",
+      "B" + xyzFormat.format(getMakinoCorner(cycle.approach1, cycle.approach2)),
+      conditional(cornerI != 0, "X" + xyzFormat.format(cornerI)),
+      conditional(cornerJ != 0, "Y" + xyzFormat.format(cornerJ)),
+      getMakinoWCS()
     );
     break;
+  // ── Not supported by Makino EasySet ─────────────────────────────────────────
   case "probing-x-plane-angle":
-    protectedProbeMove(cycle, x, y, z - cycle.depth);
-    writeBlock(
-      macroCall, "P" + 9843,
-      "X" + xyzFormat.format(x + approach(cycle.approach1) * (cycle.probeClearance + tool.diameter / 2)),
-      "D" + xyzFormat.format(cycle.probeSpacing),
-      "Q" + xyzFormat.format(cycle.probeOvertravel),
-      "A" + xyzFormat.format(cycle.nominalAngle != undefined ? cycle.nominalAngle : 90),
-      getProbingArguments(cycle, false)
-    );
-    if (currentSection.strategy == "probe") {
-      setProbeAngleMethod();
-      probeVariables.compensationXY = "X" + xyzFormat.format(0) + " Y" + xyzFormat.format(0);
-    }
-    break;
   case "probing-y-plane-angle":
-    protectedProbeMove(cycle, x, y, z - cycle.depth);
-    writeBlock(
-      macroCall, "P" + 9843,
-      "Y" + xyzFormat.format(y + approach(cycle.approach1) * (cycle.probeClearance + tool.diameter / 2)),
-      "D" + xyzFormat.format(cycle.probeSpacing),
-      "Q" + xyzFormat.format(cycle.probeOvertravel),
-      "A" + xyzFormat.format(cycle.nominalAngle != undefined ? cycle.nominalAngle : 0),
-      getProbingArguments(cycle, false)
-    );
-    if (currentSection.strategy == "probe") {
-      setProbeAngleMethod();
-      probeVariables.compensationXY = "X" + xyzFormat.format(0) + " Y" + xyzFormat.format(0);
-    }
-    break;
   case "probing-xy-pcd-hole":
-    protectedProbeMove(cycle, x, y, z);
-    writeBlock(
-      macroCall, "P" + 9819,
-      "A" + xyzFormat.format(cycle.pcdStartingAngle),
-      "B" + xyzFormat.format(cycle.numberOfSubfeatures),
-      "C" + xyzFormat.format(cycle.widthPCD),
-      "D" + xyzFormat.format(cycle.widthFeature),
-      "K" + xyzFormat.format(z - cycle.depth),
-      "Q" + xyzFormat.format(cycle.probeOvertravel),
-      getProbingArguments(cycle, false)
-    );
-    if (cycle.updateToolWear) {
-      error(localize("Action -Update Tool Wear- is not supported with this cycle."));
-      return;
-    }
-    break;
   case "probing-xy-pcd-boss":
-    protectedProbeMove(cycle, x, y, z);
-    writeBlock(
-      macroCall, "P" + 9819,
-      "A" + xyzFormat.format(cycle.pcdStartingAngle),
-      "B" + xyzFormat.format(cycle.numberOfSubfeatures),
-      "C" + xyzFormat.format(cycle.widthPCD),
-      "D" + xyzFormat.format(cycle.widthFeature),
-      "Z" + xyzFormat.format(z - cycle.depth),
-      "Q" + xyzFormat.format(cycle.probeOvertravel),
-      "R" + xyzFormat.format(cycle.probeClearance),
-      getProbingArguments(cycle, false)
-    );
-    if (cycle.updateToolWear) {
-      error(localize("Action -Update Tool Wear- is not supported with this cycle."));
-      return;
-    }
+    cycleNotSupported();
     break;
   default:
     cycleNotSupported();
@@ -3741,54 +3549,42 @@ function approach(value) {
   return (value == "positive") ? 1 : -1;
 }
 // <<<<< INCLUDED FROM include_files/probeCycles_renishaw.cpi
-// >>>>> INCLUDED FROM include_files/getProbingArguments_renishaw.cpi
-function getProbingArguments(cycle, updateWCS) {
-  var outputWCSCode = updateWCS && currentSection.strategy == "probe";
-  if (outputWCSCode) {
-    var maximumWcsNumber = 0;
-    for (var i in wcsDefinitions.wcs) {
-      maximumWcsNumber = Math.max(maximumWcsNumber, wcsDefinitions.wcs[i].range[1]);
-    }
-    maximumWcsNumber = probeExtWCSFormat.getResultingValue(maximumWcsNumber);
-    var resultingWcsNumber = probeExtWCSFormat.getResultingValue(currentSection.probeWorkOffset - 6);
-    validate(resultingWcsNumber <= maximumWcsNumber, subst("Probe work offset %1 is out of range, maximum value is %2.", resultingWcsNumber, maximumWcsNumber));
-    var probeOutputWorkOffset = currentSection.probeWorkOffset > 6 ? probeExtWCSFormat.format(currentSection.probeWorkOffset - 6) : probeWCSFormat.format(currentSection.probeWorkOffset);
-
+// Makino EasySet WCS: S1=G54, S2=G55, S3=G56, etc.
+function getMakinoWCS() {
+  if (currentSection.strategy == "probe") {
     var nextWorkOffset = hasNextSection() ? getNextSection().workOffset == 0 ? 1 : getNextSection().workOffset : -1;
     if (currentSection.probeWorkOffset == nextWorkOffset) {
       currentWorkOffset = undefined;
     }
+    return "S" + currentSection.probeWorkOffset;
   }
-  return [
-    (cycle.angleAskewAction == "stop-message" ? "B" + xyzFormat.format(cycle.toleranceAngle ? cycle.toleranceAngle : 0) : undefined),
-    ((cycle.updateToolWear && cycle.toolWearErrorCorrection < 100) ? "F" + xyzFormat.format(cycle.toolWearErrorCorrection ? cycle.toolWearErrorCorrection / 100 : 100) : undefined),
-    (cycle.wrongSizeAction == "stop-message" ? "H" + xyzFormat.format(cycle.toleranceSize ? cycle.toleranceSize : 0) : undefined),
-    (cycle.outOfPositionAction == "stop-message" ? "M" + xyzFormat.format(cycle.tolerancePosition ? cycle.tolerancePosition : 0) : undefined),
-    ((cycle.updateToolWear && cycleType == "probing-z") ? "T" + xyzFormat.format(cycle.toolLengthOffset) : undefined),
-    ((cycle.updateToolWear && cycleType !== "probing-z") ? "T" + xyzFormat.format(cycle.toolDiameterOffset) : undefined),
-    (cycle.updateToolWear ? "V" + xyzFormat.format(cycle.toolWearUpdateThreshold ? cycle.toolWearUpdateThreshold : 0) : undefined),
-    (cycle.printResults ? "W" + xyzFormat.format(1 + cycle.incrementComponent) : undefined), // 1 for advance feature, 2 for reset feature count and advance component number. first reported result in a program should use W2.
-    conditional(outputWCSCode, probeOutputWorkOffset)
-  ];
+  return "";
 }
-// <<<<< INCLUDED FROM include_files/getProbingArguments_renishaw.cpi
-// >>>>> INCLUDED FROM include_files/protectedProbeMove_renishaw.cpi
+
+// Corner number from approach directions: B1=Lower-Left, B2=Upper-Left, B3=Upper-Right, B4=Lower-Right
+function getMakinoCorner(approach1, approach2) {
+  var ax = approach(approach1);
+  var ay = approach(approach2);
+  if (ax > 0 && ay > 0) { return 3; } // Upper Right
+  if (ax > 0 && ay < 0) { return 4; } // Lower Right
+  if (ax < 0 && ay > 0) { return 2; } // Upper Left
+  return 1;                            // Lower Left
+}
+// Makino: position moves use standard G00 — G170 handles probe protection internally
 function protectedProbeMove(_cycle, x, y, z) {
   var _x = xOutput.format(x);
   var _y = yOutput.format(y);
   var _z = zOutput.format(z);
-  var macroCall = settings.probing.macroCall;
   if (_z && z >= getCurrentPosition().z) {
-    writeBlock(macroCall, "P" + 9810, _z, getFeed(cycle.feedrate)); // protected positioning move
+    writeBlock(gMotionModal.format(0), _z);
   }
   if (_x || _y) {
-    writeBlock(macroCall, "P" + 9810, _x, _y, getFeed(highFeedrate)); // protected positioning move
+    writeBlock(gMotionModal.format(0), _x, _y);
   }
   if (_z && z < getCurrentPosition().z) {
-    writeBlock(macroCall, "P" + 9810, _z, getFeed(cycle.feedrate)); // protected positioning move
+    writeBlock(gMotionModal.format(0), _z);
   }
 }
-// <<<<< INCLUDED FROM include_files/protectedProbeMove_renishaw.cpi
 // >>>>> INCLUDED FROM include_files/setProbeAngle_fanuc.cpi
 function setProbeAngle() {
   if (probeVariables.outputRotationCodes) {

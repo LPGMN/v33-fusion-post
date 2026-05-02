@@ -10,7 +10,7 @@
   FORKID {97D024CD-3FC3-4161-8BA2-06EA3E072945}
 */
 
-description = "Makino V33 3-axis V1.3";
+description = "Makino V33 3-axis V1.3.1";
 vendor = "Makino";
 vendorUrl = "https://www.makino.com/";
 legal = "Copyright (C) 2012-2026 by Autodesk, Inc.";
@@ -701,6 +701,7 @@ function onCommand(command) {
   case COMMAND_STOP_CHIP_TRANSPORT:
     return;
   case COMMAND_BREAK_CONTROL:
+    writeBlock(mFormat.format(20));
     return;
   case COMMAND_TOOL_MEASURE:
     return;

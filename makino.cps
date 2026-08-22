@@ -8,9 +8,16 @@
   $Date: 2026-01-07 13:44:58 $
 
   FORKID {97D024CD-3FC3-4161-8BA2-06EA3E072945}
+
+  CHANGELOG:
+  V1.4.1 - 2026-08-22 - IAL: Restored next-tool preload T-call on regular tool changes (COMMAND_LOAD_TOOL) - this is a required part of the post, not the source of the V1.3.2 issue; V1.3.2's removal was based on a misdiagnosis.
+  V1.4.0 - 2026-08-21 - IAL: Fixed G170/O9012 EasySet probing - N-word was left to the auto sequence counter instead of being forced per cycle, causing FORMAT ERROR alarms or wrong probing cycles (see writeEasysetProbeBlock). Also forced M250 for all probe operations regardless of machiningMode.
+  V1.3.3 - 2026-05-24 - IAL: Restored touchoff block; preload T-call kept inside touchoff loop only (needed for ATC sequencing), removed from regular tool changes
+  V1.3.2 - 2026-05-24 - IAL: Removed next-tool preload T-calls after tool change (was causing machine errors)
+  V1.3.1 - 2026-03-09 - IAL: Added M77 air-through-tool coolant support
 */
 
-description = "Makino V33 3-axis V1.3.1";
+description = "Makino V33 3-axis V1.4.1";
 vendor = "Makino";
 vendorUrl = "https://www.makino.com/";
 legal = "Copyright (C) 2012-2026 by Autodesk, Inc.";
@@ -61,10 +68,10 @@ properties = {
   },
   sequenceNumberStart: {
     title      : "Start sequence number",
-    description: "The number at which to start the sequence numbers.",
+    description: "The number at which to start the sequence numbers. Must be 200 or higher - N10 through N170 are reserved as G170/O9012 Renishaw EasySet cycle selectors (see writeEasysetProbeBlock) and will collide with probing if ordinary block numbering starts inside that range.",
     group      : "formats",
     type       : "integer",
-    value      : 10,
+    value      : 200,
     scope      : "post"
   },
   sequenceNumberIncrement: {
@@ -468,6 +475,34 @@ function onOpen() {
   writeBlock(gPlaneModal.format(17), gFormat.format(40), toolLengthCompOutput.format(49), gFormat.format(80), gAbsIncModal.format(90), gFeedModeModal.format(94));
   writeBlock(gUnitModal.format(unit == MM ? 21 : 20));
   validateCommonParameters();
+
+  // Auto tool length measurement for all tools - entire section is block-delete skippable
+  var measureTools = [];
+  var measuredIds = [];
+  for (var i = 0; i < getNumberOfSections(); ++i) {
+    var t = getSection(i).getTool();
+    if (t.type == TOOL_PROBE) {
+      continue; // the touch probe is not a cutting tool - never stage it through the tool-length-measurement macro
+    }
+    if (measuredIds.indexOf(t.number) === -1) {
+      measuredIds.push(t.number);
+      measureTools.push(t);
+    }
+  }
+  if (measureTools.length > 0) {
+    var saveSkipBlocks = skipBlocks;
+    skipBlocks = true;
+    writeln("");
+    writeBlock(formatComment("TOOL LENGTH MEASUREMENT - BLOCK DELETE TO SKIP"));
+    for (var i = 0; i < measureTools.length; ++i) {
+      writeToolBlock("T" + toolFormat.format(measureTools[i].number), mFormat.format(6));
+      if (i + 1 < measureTools.length) {
+        writeBlock("T" + toolFormat.format(measureTools[i + 1].number)); // stage next tool for ATC sequencing
+      }
+      writeBlock("G65 P9862 T1 D2");
+    }
+    skipBlocks = saveSkipBlocks;
+  }
 }
 
 function setSmoothing(mode) {
@@ -674,7 +709,6 @@ function onCommand(command) {
   case COMMAND_LOAD_TOOL:
     writeToolBlock("T" + toolFormat.format(tool.number), mFormat.format(6));
     writeComment(tool.comment);
-
     var preloadTool = getNextTool(tool.number != getFirstTool().number);
     if (getProperty("preloadTool") && preloadTool) {
       writeBlock("T" + toolFormat.format(preloadTool.number)); // preload next/first tool
@@ -764,6 +798,11 @@ function onClose() {
 
   if (getSetting("retract.homeXY.onProgramEnd", false)) {
     writeRetract(settings.retract.homeXY.onProgramEnd);
+  }
+  var firstTool = getFirstTool();
+  if (firstTool) {
+    onCommand(COMMAND_STOP_SPINDLE);
+    writeToolBlock("T" + toolFormat.format(firstTool.number), mFormat.format(6));
   }
   writeBlock(mFormat.format(30)); // stop program, spindle stop, coolant off
   if (subprogramsAreSupported()) {
@@ -1733,7 +1772,9 @@ function setMachiningMode() {
   }
 
   var mCode;
-  if (modeProp == "auto") {
+  if (isProbeOperation()) {
+    mCode = 250; // Renishaw probing requires High Accuracy mode - force it regardless of the prior operation's mode
+  } else if (modeProp == "auto") {
     var thresholdRoughing  = toPreciseUnit(0.5, MM);
     var thresholdFinishing = toPreciseUnit(0.05, MM);
     var stockToLeave         = xyzFormat.getResultingValue(getParameter("operation:stockToLeave", getParameter("operation:verticalStockToLeave", 0)));
@@ -3359,6 +3400,70 @@ var probeVariables = {
   probeAngleMethod   : undefined,
   rotaryTableAxis    : -1
 };
+
+/**
+  Writes a G170 block with an explicit, forced N-word.
+
+  O9012 (Makino Renishaw EasySet) reads its OWN block's sequence number via
+  #4114, divides it by 10, and branches on that value to pick the probing
+  cycle it runs (see the EasySet macro listing). The N-word on a G170 line is
+  therefore live macro-selector data, not a cosmetic sequence number - it
+  must never be left to the normal auto-incrementing counter in writeBlock(),
+  which will assign whatever number the counter happens to be at and either
+  alarm (#3000=91 FORMAT ERROR) or run the wrong probing cycle.
+
+  This intentionally bypasses writeBlock()'s counter entirely (and ignores
+  showSequenceNumbers) because the N-word here is mandatory, not optional
+  formatting - but it still nudges the global sequenceNumber counter forward
+  past this forced value if the auto counter would otherwise repeat it, so
+  normal block numbering elsewhere in the program stays unique.
+*/
+function writeEasysetProbeBlock(nWord) {
+  var text = formatWords(Array.prototype.slice.call(arguments, 1));
+  if (!text) {
+    return;
+  }
+  var prefix = getSetting("sequenceNumberPrefix", "N");
+  var suffix = getSetting("writeBlockSuffix", "");
+  if ((optionalSection || skipBlocks) && !getSetting("supportsOptionalBlocks", true)) {
+    error(localize("Optional blocks are not supported by this post."));
+  }
+  if (optionalSection || skipBlocks) {
+    writeWords2("/", prefix + nWord, text + suffix);
+  } else {
+    writeWords2(prefix + nWord, text + suffix);
+  }
+  // O9012's reserved selector range (N10-N170) overlaps the default auto
+  // sequence-number range, and EasySet probing typically runs early in a
+  // program (tool touch-off, WCS setup) while the auto counter is still down
+  // there - so without this, the next ordinary block is very likely to
+  // restate this exact N-word. Push the auto counter past it when that would
+  // happen, so block numbers stay unique without disturbing this forced one.
+  if (getProperty("showSequenceNumbers") == "true" && sequenceNumber != undefined && sequenceNumber <= nWord) {
+    sequenceNumber = nWord + getProperty("sequenceNumberIncrement");
+  }
+}
+
+/*
+  O9012 required calling N-word per cycle (N-word = branch # x 10):
+    N10  BORE                  (D, no Z)
+    N20  BOSS                  (D + Z)
+    N30  X/Y POCKET            (X or Y, no Z)
+    N40  X/Y WEB               (X or Y + Z)
+    N50  SET SURF X, positive approach     N60  SET SURF X, negative approach
+    N70  SET SURF Y, positive approach     N80  SET SURF Y, negative approach
+    N90  SET SURF Z
+    N100 SET INTERNAL CORNER   N110 SET EXTERNAL CORNER
+    N120 CENTER BLOCK (X+Y+Z)  N160 CENTER BLOCK NO Z (X+Y only)
+    N140 3-POINT BORE (D+ABC)  N150 3-POINT BOSS (D+ABC+Z)
+  NOTE: O9012 has no separate branch for "island"/internal-approach probing -
+  it only distinguishes cycles by which arguments are present (D vs D+Z,
+  X vs X+Z, X+Y vs X+Y+Z). So "-with-island" cycle types below reuse the
+  same N-word as the plain boss/rectangular-boss case and will probe with
+  boss (outward) approach direction, not island (inward) - do not use those
+  Fusion probing strategies with this post without verifying the actual
+  approach direction needed on the machine first.
+*/
 function writeProbeCycle(cycle, x, y, z, P, F) {
   if (isProbeOperation()) {
     if (!settings.workPlaneMethod.useTiltedWorkplane && !isSameDirection(currentSection.workPlane.forward, new Vector(0, 0, 1))) {
@@ -3389,52 +3494,56 @@ function writeProbeCycle(cycle, x, y, z, P, F) {
 
   switch (cycleType) {
   // ── Single surface ──────────────────────────────────────────────────────────
+  // NOTE: which physical direction is "positive" vs "negative" approach maps
+  // to N50/N60 (X) and N70/N80 (Y) has not been verified against a real
+  // surface-probe post - if wrong, Fusion errors at generation time rather
+  // than silently emitting a wrong-direction move (see approach()'s validate).
   case "probing-x":
     protectedProbeMove(cycle, x, y, z - cycle.depth);
-    writeBlock("G170", "X" + xyzFormat.format(0), getMakinoWCS());
+    writeEasysetProbeBlock(approach(cycle.approach1) > 0 ? 50 : 60, "G170", "X" + xyzFormat.format(0), getMakinoWCS());
     break;
   case "probing-y":
     protectedProbeMove(cycle, x, y, z - cycle.depth);
-    writeBlock("G170", "Y" + xyzFormat.format(0), getMakinoWCS());
+    writeEasysetProbeBlock(approach(cycle.approach1) > 0 ? 70 : 80, "G170", "Y" + xyzFormat.format(0), getMakinoWCS());
     break;
   case "probing-z":
     protectedProbeMove(cycle, x, y, Math.min(z - cycle.depth + cycle.probeClearance, cycle.retract));
-    writeBlock("G170", "Z" + xyzFormat.format(0), getMakinoWCS());
+    writeEasysetProbeBlock(90, "G170", "Z" + xyzFormat.format(0), getMakinoWCS());
     break;
-  // ── Webs (external walls) ───────────────────────────────────────────────────
+  // ── Webs (external walls, X/Y + Z) ──────────────────────────────────────────
   case "probing-x-wall":
     protectedProbeMove(cycle, x, y, z);
-    writeBlock("G170", "X" + xyzFormat.format(cycle.width1), "Z" + xyzFormat.format(-cycle.depth), getMakinoWCS());
+    writeEasysetProbeBlock(40, "G170", "X" + xyzFormat.format(cycle.width1), "Z" + xyzFormat.format(-cycle.depth), getMakinoWCS());
     break;
   case "probing-y-wall":
     protectedProbeMove(cycle, x, y, z);
-    writeBlock("G170", "Y" + xyzFormat.format(cycle.width1), "Z" + xyzFormat.format(-cycle.depth), getMakinoWCS());
+    writeEasysetProbeBlock(40, "G170", "Y" + xyzFormat.format(cycle.width1), "Z" + xyzFormat.format(-cycle.depth), getMakinoWCS());
     break;
-  // ── Pockets (internal walls) ────────────────────────────────────────────────
+  // ── Pockets (internal walls, X/Y only, no Z) ────────────────────────────────
   case "probing-x-channel":
     protectedProbeMove(cycle, x, y, z - cycle.depth);
-    writeBlock("G170", "X" + xyzFormat.format(cycle.width1), getMakinoWCS());
+    writeEasysetProbeBlock(30, "G170", "X" + xyzFormat.format(cycle.width1), getMakinoWCS());
     break;
   case "probing-x-channel-with-island":
     protectedProbeMove(cycle, x, y, z);
-    writeBlock("G170", "X" + xyzFormat.format(cycle.width1), "Z" + xyzFormat.format(-cycle.depth), getMakinoWCS());
+    writeEasysetProbeBlock(40, "G170", "X" + xyzFormat.format(cycle.width1), "Z" + xyzFormat.format(-cycle.depth), getMakinoWCS());
     break;
   case "probing-y-channel":
     protectedProbeMove(cycle, x, y, z - cycle.depth);
-    writeBlock("G170", "Y" + xyzFormat.format(cycle.width1), getMakinoWCS());
+    writeEasysetProbeBlock(30, "G170", "Y" + xyzFormat.format(cycle.width1), getMakinoWCS());
     break;
   case "probing-y-channel-with-island":
     protectedProbeMove(cycle, x, y, z);
-    writeBlock("G170", "Y" + xyzFormat.format(cycle.width1), "Z" + xyzFormat.format(-cycle.depth), getMakinoWCS());
+    writeEasysetProbeBlock(40, "G170", "Y" + xyzFormat.format(cycle.width1), "Z" + xyzFormat.format(-cycle.depth), getMakinoWCS());
     break;
-  // ── Bosses ──────────────────────────────────────────────────────────────────
+  // ── Bosses (D + Z) ───────────────────────────────────────────────────────────
   case "probing-xy-circular-boss":
     protectedProbeMove(cycle, x, y, z);
-    writeBlock("G170", "D" + xyzFormat.format(cycle.width1), "Z" + xyzFormat.format(-cycle.depth), getMakinoWCS());
+    writeEasysetProbeBlock(20, "G170", "D" + xyzFormat.format(cycle.width1), "Z" + xyzFormat.format(-cycle.depth), getMakinoWCS());
     break;
   case "probing-xy-circular-partial-boss":
     protectedProbeMove(cycle, x, y, z);
-    writeBlock("G170",
+    writeEasysetProbeBlock(150, "G170",
       "D" + xyzFormat.format(cycle.width1),
       "A" + xyzFormat.format(cycle.partialCircleAngleA),
       "B" + xyzFormat.format(cycle.partialCircleAngleB),
@@ -3443,14 +3552,14 @@ function writeProbeCycle(cycle, x, y, z, P, F) {
       getMakinoWCS()
     );
     break;
-  // ── Bores ───────────────────────────────────────────────────────────────────
+  // ── Bores (D only, no Z) ─────────────────────────────────────────────────────
   case "probing-xy-circular-hole":
     protectedProbeMove(cycle, x, y, z - cycle.depth);
-    writeBlock("G170", "D" + xyzFormat.format(cycle.width1), getMakinoWCS());
+    writeEasysetProbeBlock(10, "G170", "D" + xyzFormat.format(cycle.width1), getMakinoWCS());
     break;
   case "probing-xy-circular-partial-hole":
     protectedProbeMove(cycle, x, y, z - cycle.depth);
-    writeBlock("G170",
+    writeEasysetProbeBlock(140, "G170",
       "D" + xyzFormat.format(cycle.width1),
       "A" + xyzFormat.format(cycle.partialCircleAngleA),
       "B" + xyzFormat.format(cycle.partialCircleAngleB),
@@ -3458,13 +3567,16 @@ function writeProbeCycle(cycle, x, y, z, P, F) {
       getMakinoWCS()
     );
     break;
+  // O9012 has no distinct "island" branch - this probes with the same
+  // outward BOSS approach as probing-xy-circular-boss. Verify direction
+  // before running if the feature is actually an internal island.
   case "probing-xy-circular-hole-with-island":
     protectedProbeMove(cycle, x, y, z);
-    writeBlock("G170", "D" + xyzFormat.format(cycle.width1), "Z" + xyzFormat.format(-cycle.depth), getMakinoWCS());
+    writeEasysetProbeBlock(20, "G170", "D" + xyzFormat.format(cycle.width1), "Z" + xyzFormat.format(-cycle.depth), getMakinoWCS());
     break;
   case "probing-xy-circular-partial-hole-with-island":
     protectedProbeMove(cycle, x, y, z);
-    writeBlock("G170",
+    writeEasysetProbeBlock(150, "G170",
       "D" + xyzFormat.format(cycle.width1),
       "A" + xyzFormat.format(cycle.partialCircleAngleA),
       "B" + xyzFormat.format(cycle.partialCircleAngleB),
@@ -3476,14 +3588,14 @@ function writeProbeCycle(cycle, x, y, z, P, F) {
   // ── Center blocks / rectangular pockets/bosses ──────────────────────────────
   case "probing-xy-rectangular-hole":
     protectedProbeMove(cycle, x, y, z - cycle.depth);
-    writeBlock("G170", "X" + xyzFormat.format(cycle.width1), "Y" + xyzFormat.format(cycle.width2), getMakinoWCS());
+    writeEasysetProbeBlock(160, "G170", "X" + xyzFormat.format(cycle.width1), "Y" + xyzFormat.format(cycle.width2), getMakinoWCS());
     if (getProperty("useLiveConnection") && (typeof liveConnectionStoreResults == "function")) {
       liveConnectionStoreResults();
     }
     break;
   case "probing-xy-rectangular-boss":
     protectedProbeMove(cycle, x, y, z);
-    writeBlock("G170",
+    writeEasysetProbeBlock(120, "G170",
       "X" + xyzFormat.format(cycle.width1),
       "Y" + xyzFormat.format(cycle.width2),
       "Z" + xyzFormat.format(-cycle.depth),
@@ -3493,9 +3605,11 @@ function writeProbeCycle(cycle, x, y, z, P, F) {
       liveConnectionStoreResults();
     }
     break;
+  // Same island caveat as the circular case above - O9012 can't distinguish
+  // this from probing-xy-rectangular-boss by argument signature alone.
   case "probing-xy-rectangular-hole-with-island":
     protectedProbeMove(cycle, x, y, z);
-    writeBlock("G170",
+    writeEasysetProbeBlock(120, "G170",
       "X" + xyzFormat.format(cycle.width1),
       "Y" + xyzFormat.format(cycle.width2),
       "Z" + xyzFormat.format(-cycle.depth),
@@ -3510,7 +3624,7 @@ function writeProbeCycle(cycle, x, y, z, P, F) {
     var cornerI = cycle.probeSpacing !== undefined ? cycle.probeSpacing : 0;
     var cornerJ = cycle.probeSpacing !== undefined ? cycle.probeSpacing : 0;
     protectedProbeMove(cycle, x, y, z - cycle.depth);
-    writeBlock("G170",
+    writeEasysetProbeBlock(100, "G170",
       "B" + xyzFormat.format(getMakinoCorner(cycle.approach1, cycle.approach2)),
       conditional(cornerI != 0, "X" + xyzFormat.format(cornerI)),
       conditional(cornerJ != 0, "Y" + xyzFormat.format(cornerJ)),
@@ -3521,7 +3635,7 @@ function writeProbeCycle(cycle, x, y, z, P, F) {
     var cornerI = cycle.probeSpacing !== undefined ? cycle.probeSpacing : 0;
     var cornerJ = cycle.probeSpacing !== undefined ? cycle.probeSpacing : 0;
     protectedProbeMove(cycle, x, y, z - cycle.depth);
-    writeBlock("G170",
+    writeEasysetProbeBlock(110, "G170",
       "B" + xyzFormat.format(getMakinoCorner(cycle.approach1, cycle.approach2)),
       conditional(cornerI != 0, "X" + xyzFormat.format(cornerI)),
       conditional(cornerJ != 0, "Y" + xyzFormat.format(cornerJ)),

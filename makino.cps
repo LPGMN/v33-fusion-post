@@ -10,6 +10,7 @@
   FORKID {97D024CD-3FC3-4161-8BA2-06EA3E072945}
 
   CHANGELOG:
+  V1.4.6 - 2026-08-22 - IAL: V1.4.2's protected retract after a probe cycle (G65 P9510, using G31 skip) caused a real probe communication error on the machine, occurring right after a successful Z touch (offset write still completed first). Root cause confirmed against the real machine's own O9511 (RENISHAW XYZ MEASURE) macro: it always retracts off a touch with a plain G01, in both its normal and fault paths, never G31 again - G31 re-arms the probe's skip/trigger circuit, and doing that again immediately after a touch, before the interface resets, is what breaks communication. onCycleEnd() now retracts with a plain G00 after a probe cycle, matching the machine's own macro. protectedProbeMove() (the approach move before G170 activates, which is what was originally reported as unsafe) is unaffected - it moves toward the part before any touch has happened, which is a different situation.
   V1.4.5 - 2026-08-22 - IAL: G170/O9012 has no "check only" mode at all (confirmed by direct, motion-free MDI testing of O9432: S0 writes the EXT/common offset, not a skip - and omitting S was already confirmed to default to S1/G54). Since every valid S writes a real register, inspection-only probe cycles (e.g. Probe Geometry / feature-tolerance checks) now target a dedicated new "Inspection-only scratch work offset" property (inspectionScratchWorkOffset, default S6/G59) instead of erroring out - this offset must never be used for actual part machining. The tolerance check/alarm (O9401) is unaffected either way and still runs regardless of the S value.
   V1.4.4 - 2026-08-22 - IAL: V1.4.3's S0 "fix" was itself unsafe - confirmed on the real machine that S0 does not make O9012/O9401 skip the work-offset write as their own code comments imply; it instead wrote into the EXT/common offset and caused a Z+ overtravel. getMakinoWCS() now errors out and refuses to post any probe cycle with no WCS to update (e.g. Probe Geometry / feature-tolerance inspection) until the correct machine-verified value is found. Do not reintroduce a guessed S value without confirming it against the real O9012/O9401/O9432 macros first.
   V1.4.3 - 2026-08-22 - IAL: Fixed inspection-only probe cycles (e.g. Probe Geometry / feature-tolerance checks, which have no work-offset UI at all) silently overwriting G54 - getMakinoWCS() was omitting the S word for these, and O9012 treats a missing S as S1 (its own hardcoded default), not "leave WCS alone". Now sends S0 explicitly, which O9401 checks to run tolerance-check-only and skip the WCS write. See getMakinoWCS().
@@ -21,7 +22,7 @@
   V1.3.1 - 2026-03-09 - IAL: Added M77 air-through-tool coolant support
 */
 
-description = "Makino V33 3-axis V1.4.5";
+description = "Makino V33 3-axis V1.4.6";
 vendor = "Makino";
 vendorUrl = "https://www.makino.com/";
 legal = "Copyright (C) 2012-2026 by Autodesk, Inc.";
@@ -678,8 +679,16 @@ function onCycleEnd() {
   if (isProbeOperation()) {
     zOutput.reset();
     gMotionModal.reset();
-    forceFeed();
-    writeBlock(settings.probing.macroCall, "P9510", zOutput.format(cycle.retract), getFeed(cycle.feedrate)); // protected retract move after probe cycle
+    // Do NOT protect this move with G65 P9510 (G31 skip). Confirmed on the real
+    // machine's own O9511 (RENISHAW XYZ MEASURE): after a touch it always retracts
+    // with a plain G01, in both its normal and fault paths - never G31 again. G31
+    // re-arms the probe's skip/trigger circuit; issuing it again immediately after
+    // a touch, before the interface has reset from the trigger, caused a probe
+    // communication error on this machine (confirmed - error appeared right after
+    // a successful Z touch, occurring here). The part-collision risk this was meant
+    // to guard against doesn't apply here: the probe has already retracted off the
+    // triggering surface by the time this move to full cycle.retract height runs.
+    writeBlock(gMotionModal.format(0), zOutput.format(cycle.retract));
   } else {
     if (subprogramsAreSupported() && subprogramState.cycleSubprogramIsActive) {
       subprogramEnd();

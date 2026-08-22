@@ -10,6 +10,7 @@
   FORKID {97D024CD-3FC3-4161-8BA2-06EA3E072945}
 
   CHANGELOG:
+  V1.4.2 - 2026-08-22 - IAL: Restored protected positioning (G65 P9510, confirmed present on the machine as O9510 "RENISHAW PROTECTED POSN") for probe approach/retract moves - G170/O9012 only monitors for contact once its own block executes, so the prior plain-G00 moves that bring the probe close to the part beforehand were unprotected. See protectedProbeMove().
   V1.4.1 - 2026-08-22 - IAL: Restored next-tool preload T-call on regular tool changes (COMMAND_LOAD_TOOL) - this is a required part of the post, not the source of the V1.3.2 issue; V1.3.2's removal was based on a misdiagnosis.
   V1.4.0 - 2026-08-21 - IAL: Fixed G170/O9012 EasySet probing - N-word was left to the auto sequence counter instead of being forced per cycle, causing FORMAT ERROR alarms or wrong probing cycles (see writeEasysetProbeBlock). Also forced M250 for all probe operations regardless of machiningMode.
   V1.3.3 - 2026-05-24 - IAL: Restored touchoff block; preload T-call kept inside touchoff loop only (needed for ATC sequencing), removed from regular tool changes
@@ -17,7 +18,7 @@
   V1.3.1 - 2026-03-09 - IAL: Added M77 air-through-tool coolant support
 */
 
-description = "Makino V33 3-axis V1.4.1";
+description = "Makino V33 3-axis V1.4.2";
 vendor = "Makino";
 vendorUrl = "https://www.makino.com/";
 legal = "Copyright (C) 2012-2026 by Autodesk, Inc.";
@@ -666,7 +667,8 @@ function onCycleEnd() {
   if (isProbeOperation()) {
     zOutput.reset();
     gMotionModal.reset();
-    writeBlock(gMotionModal.format(0), zOutput.format(cycle.retract)); // retract after probe cycle
+    forceFeed();
+    writeBlock(settings.probing.macroCall, "P9510", zOutput.format(cycle.retract), getFeed(cycle.feedrate)); // protected retract move after probe cycle
   } else {
     if (subprogramsAreSupported() && subprogramState.cycleSubprogramIsActive) {
       subprogramEnd();
@@ -3685,19 +3687,36 @@ function getMakinoCorner(approach1, approach2) {
   if (ax < 0 && ay > 0) { return 2; } // Upper Left
   return 1;                            // Lower Left
 }
-// Makino: position moves use standard G00 — G170 handles probe protection internally
+/*
+  G170/O9012 (Renishaw EasySet) only starts monitoring the stylus once its own
+  block executes - it does not protect the moves that bring the probe close to
+  the part beforehand. Those moves are made protected here instead, via G65
+  P9510 - confirmed present on this machine's control as O9510 "RENISHAW
+  PROTECTED POSN": it drives the move with the G31 skip function and checks
+  the stopping position against the programmed target, alarming #3000=86
+  PATH OBSTRUCTED (see O9400) if the stylus trips early instead of letting the
+  probe crash through at rapid.
+*/
 function protectedProbeMove(_cycle, x, y, z) {
+  // O9510 reads F as a macro argument (#9), not a true modal register - it is
+  // only carried over between calls through its own internal fallback (#117),
+  // which is set from a previous P9510 call. Force the F word on every call so
+  // it is never silently dropped by feedOutput's own modal suppression.
+  var macroCall = settings.probing.macroCall;
   var _x = xOutput.format(x);
   var _y = yOutput.format(y);
   var _z = zOutput.format(z);
   if (_z && z >= getCurrentPosition().z) {
-    writeBlock(gMotionModal.format(0), _z);
+    forceFeed();
+    writeBlock(macroCall, "P9510", _z, getFeed(_cycle.feedrate)); // protected positioning move
   }
   if (_x || _y) {
-    writeBlock(gMotionModal.format(0), _x, _y);
+    forceFeed();
+    writeBlock(macroCall, "P9510", _x, _y, getFeed(highFeedrate)); // protected positioning move
   }
   if (_z && z < getCurrentPosition().z) {
-    writeBlock(gMotionModal.format(0), _z);
+    forceFeed();
+    writeBlock(macroCall, "P9510", _z, getFeed(_cycle.feedrate)); // protected positioning move
   }
 }
 // >>>>> INCLUDED FROM include_files/setProbeAngle_fanuc.cpi

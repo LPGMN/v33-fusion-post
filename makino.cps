@@ -10,6 +10,7 @@
   FORKID {97D024CD-3FC3-4161-8BA2-06EA3E072945}
 
   CHANGELOG:
+  V1.4.5 - 2026-08-22 - IAL: G170/O9012 has no "check only" mode at all (confirmed by direct, motion-free MDI testing of O9432: S0 writes the EXT/common offset, not a skip - and omitting S was already confirmed to default to S1/G54). Since every valid S writes a real register, inspection-only probe cycles (e.g. Probe Geometry / feature-tolerance checks) now target a dedicated new "Inspection-only scratch work offset" property (inspectionScratchWorkOffset, default S6/G59) instead of erroring out - this offset must never be used for actual part machining. The tolerance check/alarm (O9401) is unaffected either way and still runs regardless of the S value.
   V1.4.4 - 2026-08-22 - IAL: V1.4.3's S0 "fix" was itself unsafe - confirmed on the real machine that S0 does not make O9012/O9401 skip the work-offset write as their own code comments imply; it instead wrote into the EXT/common offset and caused a Z+ overtravel. getMakinoWCS() now errors out and refuses to post any probe cycle with no WCS to update (e.g. Probe Geometry / feature-tolerance inspection) until the correct machine-verified value is found. Do not reintroduce a guessed S value without confirming it against the real O9012/O9401/O9432 macros first.
   V1.4.3 - 2026-08-22 - IAL: Fixed inspection-only probe cycles (e.g. Probe Geometry / feature-tolerance checks, which have no work-offset UI at all) silently overwriting G54 - getMakinoWCS() was omitting the S word for these, and O9012 treats a missing S as S1 (its own hardcoded default), not "leave WCS alone". Now sends S0 explicitly, which O9401 checks to run tolerance-check-only and skip the WCS write. See getMakinoWCS().
   V1.4.2 - 2026-08-22 - IAL: Restored protected positioning (G65 P9510, confirmed present on the machine as O9510 "RENISHAW PROTECTED POSN") for probe approach/retract moves - G170/O9012 only monitors for contact once its own block executes, so the prior plain-G00 moves that bring the probe close to the part beforehand were unprotected. See protectedProbeMove().
@@ -20,7 +21,7 @@
   V1.3.1 - 2026-03-09 - IAL: Added M77 air-through-tool coolant support
 */
 
-description = "Makino V33 3-axis V1.4.4";
+description = "Makino V33 3-axis V1.4.5";
 vendor = "Makino";
 vendorUrl = "https://www.makino.com/";
 legal = "Copyright (C) 2012-2026 by Autodesk, Inc.";
@@ -219,6 +220,14 @@ properties = {
     group      : "probing",
     type       : "boolean",
     value      : true,
+    scope      : "post"
+  },
+  inspectionScratchWorkOffset: {
+    title      : "Inspection-only scratch work offset (S)",
+    description: "G170/O9012 (Renishaw EasySet) always writes its measurement into a work offset - there is no built-in 'check tolerance only, touch nothing' mode. Omitting S defaults to S1 (overwrites G54, confirmed on the real machine); S0 writes into the EXT/common offset instead (also confirmed on the real machine, caused a Z+ overtravel). So any probe cycle that isn't a genuine WCS-updating operation (e.g. Probe Geometry / feature-tolerance inspection) is instead pointed at this dedicated offset number (1=G54, 2=G55, ... 6=G59, 101+=extended G54.1 offsets). It MUST be a work offset that is never used for actual part machining on this machine - confirm this before changing it, since whatever number is set here gets silently overwritten by every inspection-only probe run.",
+    group      : "probing",
+    type       : "integer",
+    value      : 6,
     scope      : "post"
   }
 };
@@ -3669,18 +3678,16 @@ function approach(value) {
 }
 // <<<<< INCLUDED FROM include_files/probeCycles_renishaw.cpi
 // Makino EasySet WCS: S1=G54, S2=G55, S3=G56, etc.
-// UNVERIFIED / UNSAFE FOR NON-WCS PROBE CYCLES: omitting S causes O9012 to
-// default S to 1 and overwrite G54 (confirmed). Sending S0 was tried as the
-// fix (O9401's results routine reads its own code as "S==0 -> skip the WCS
-// write"), but on the real machine this instead wrote into the EXT/common
-// offset and caused a Z+ overtravel - so S0 is NOT the safe "check only, do
-// not touch any offset" value either, despite what the macro text implies.
-// There is currently no known-safe S value for a probe operation with no WCS
-// to update (e.g. Probe Geometry / feature-tolerance inspection cycles).
-// DO NOT guess another value here without verifying it against the actual
-// O9012/O9401/O9432 macros on a real control first (motion-free, e.g. via
-// direct O9432 MDI testing) - error out instead so Fusion refuses to post
-// these until a verified value is confirmed.
+// G170/O9012 has no "check tolerance only, touch nothing" mode - every valid S
+// (0-400) writes into a real register. Confirmed on the real machine: omitting
+// S defaults to S1 and overwrites G54; S0 writes into the EXT/common offset
+// (caused a Z+ overtravel). So a probe operation with no WCS to update (e.g.
+// Probe Geometry / feature-tolerance inspection) is instead pointed at
+// inspectionScratchWorkOffset - a work offset dedicated to catching these
+// writes, which must never be used for actual part machining on this machine.
+// The tolerance check/alarm itself (O9401) runs and can stop the program
+// before this write happens either way, so this does not weaken that check -
+// it only decides which otherwise-unused register absorbs the side effect.
 function getMakinoWCS() {
   if (currentSection.strategy == "probe") {
     var nextWorkOffset = hasNextSection() ? getNextSection().workOffset == 0 ? 1 : getNextSection().workOffset : -1;
@@ -3689,8 +3696,7 @@ function getMakinoWCS() {
     }
     return "S" + currentSection.probeWorkOffset;
   }
-  error(localize("This probe operation does not update a work offset (e.g. Probe Geometry / feature-tolerance inspection), and no verified-safe way to tell the machine's G170/O9012 EasySet macro 'check only, do not write any offset' has been confirmed yet - sending S0 was tried and instead corrupted the EXT/common offset on this machine. Posting is blocked for this cycle until the correct value is verified against the machine directly. Contact Makino/Renishaw support or your control documentation for the correct S convention before re-enabling this."));
-  return "S0";
+  return "S" + getProperty("inspectionScratchWorkOffset");
 }
 
 // Corner number from approach directions: B1=Lower-Left, B2=Upper-Left, B3=Upper-Right, B4=Lower-Right

@@ -10,6 +10,7 @@
   FORKID {97D024CD-3FC3-4161-8BA2-06EA3E072945}
 
   CHANGELOG:
+  V1.4.4 - 2026-08-22 - IAL: V1.4.3's S0 "fix" was itself unsafe - confirmed on the real machine that S0 does not make O9012/O9401 skip the work-offset write as their own code comments imply; it instead wrote into the EXT/common offset and caused a Z+ overtravel. getMakinoWCS() now errors out and refuses to post any probe cycle with no WCS to update (e.g. Probe Geometry / feature-tolerance inspection) until the correct machine-verified value is found. Do not reintroduce a guessed S value without confirming it against the real O9012/O9401/O9432 macros first.
   V1.4.3 - 2026-08-22 - IAL: Fixed inspection-only probe cycles (e.g. Probe Geometry / feature-tolerance checks, which have no work-offset UI at all) silently overwriting G54 - getMakinoWCS() was omitting the S word for these, and O9012 treats a missing S as S1 (its own hardcoded default), not "leave WCS alone". Now sends S0 explicitly, which O9401 checks to run tolerance-check-only and skip the WCS write. See getMakinoWCS().
   V1.4.2 - 2026-08-22 - IAL: Restored protected positioning (G65 P9510, confirmed present on the machine as O9510 "RENISHAW PROTECTED POSN") for probe approach/retract moves - G170/O9012 only monitors for contact once its own block executes, so the prior plain-G00 moves that bring the probe close to the part beforehand were unprotected. See protectedProbeMove().
   V1.4.1 - 2026-08-22 - IAL: Restored next-tool preload T-call on regular tool changes (COMMAND_LOAD_TOOL) - this is a required part of the post, not the source of the V1.3.2 issue; V1.3.2's removal was based on a misdiagnosis.
@@ -19,7 +20,7 @@
   V1.3.1 - 2026-03-09 - IAL: Added M77 air-through-tool coolant support
 */
 
-description = "Makino V33 3-axis V1.4.3";
+description = "Makino V33 3-axis V1.4.4";
 vendor = "Makino";
 vendorUrl = "https://www.makino.com/";
 legal = "Copyright (C) 2012-2026 by Autodesk, Inc.";
@@ -3668,13 +3669,18 @@ function approach(value) {
 }
 // <<<<< INCLUDED FROM include_files/probeCycles_renishaw.cpi
 // Makino EasySet WCS: S1=G54, S2=G55, S3=G56, etc.
-// O9012 treats a G170 block with no S word at all as S1 (its own hardcoded
-// "#28=1 DEFAULT WORK OFFSET" fallback, not "leave WCS alone") - so a probe
-// operation with no WCS to update (e.g. a Probe Geometry / feature-tolerance
-// inspection, which has no work offset UI at all) must still send S0
-// explicitly. O9401's results routine checks S==0 to skip its WCS-write call
-// and run tolerance-check-only; omitting S here silently overwrote G54 on
-// every run instead.
+// UNVERIFIED / UNSAFE FOR NON-WCS PROBE CYCLES: omitting S causes O9012 to
+// default S to 1 and overwrite G54 (confirmed). Sending S0 was tried as the
+// fix (O9401's results routine reads its own code as "S==0 -> skip the WCS
+// write"), but on the real machine this instead wrote into the EXT/common
+// offset and caused a Z+ overtravel - so S0 is NOT the safe "check only, do
+// not touch any offset" value either, despite what the macro text implies.
+// There is currently no known-safe S value for a probe operation with no WCS
+// to update (e.g. Probe Geometry / feature-tolerance inspection cycles).
+// DO NOT guess another value here without verifying it against the actual
+// O9012/O9401/O9432 macros on a real control first (motion-free, e.g. via
+// direct O9432 MDI testing) - error out instead so Fusion refuses to post
+// these until a verified value is confirmed.
 function getMakinoWCS() {
   if (currentSection.strategy == "probe") {
     var nextWorkOffset = hasNextSection() ? getNextSection().workOffset == 0 ? 1 : getNextSection().workOffset : -1;
@@ -3683,6 +3689,7 @@ function getMakinoWCS() {
     }
     return "S" + currentSection.probeWorkOffset;
   }
+  error(localize("This probe operation does not update a work offset (e.g. Probe Geometry / feature-tolerance inspection), and no verified-safe way to tell the machine's G170/O9012 EasySet macro 'check only, do not write any offset' has been confirmed yet - sending S0 was tried and instead corrupted the EXT/common offset on this machine. Posting is blocked for this cycle until the correct value is verified against the machine directly. Contact Makino/Renishaw support or your control documentation for the correct S convention before re-enabling this."));
   return "S0";
 }
 

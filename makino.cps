@@ -10,6 +10,7 @@
   FORKID {97D024CD-3FC3-4161-8BA2-06EA3E072945}
 
   CHANGELOG:
+  V1.4.3 - 2026-08-22 - IAL: Fixed inspection-only probe cycles (e.g. Probe Geometry / feature-tolerance checks, which have no work-offset UI at all) silently overwriting G54 - getMakinoWCS() was omitting the S word for these, and O9012 treats a missing S as S1 (its own hardcoded default), not "leave WCS alone". Now sends S0 explicitly, which O9401 checks to run tolerance-check-only and skip the WCS write. See getMakinoWCS().
   V1.4.2 - 2026-08-22 - IAL: Restored protected positioning (G65 P9510, confirmed present on the machine as O9510 "RENISHAW PROTECTED POSN") for probe approach/retract moves - G170/O9012 only monitors for contact once its own block executes, so the prior plain-G00 moves that bring the probe close to the part beforehand were unprotected. See protectedProbeMove().
   V1.4.1 - 2026-08-22 - IAL: Restored next-tool preload T-call on regular tool changes (COMMAND_LOAD_TOOL) - this is a required part of the post, not the source of the V1.3.2 issue; V1.3.2's removal was based on a misdiagnosis.
   V1.4.0 - 2026-08-21 - IAL: Fixed G170/O9012 EasySet probing - N-word was left to the auto sequence counter instead of being forced per cycle, causing FORMAT ERROR alarms or wrong probing cycles (see writeEasysetProbeBlock). Also forced M250 for all probe operations regardless of machiningMode.
@@ -18,7 +19,7 @@
   V1.3.1 - 2026-03-09 - IAL: Added M77 air-through-tool coolant support
 */
 
-description = "Makino V33 3-axis V1.4.2";
+description = "Makino V33 3-axis V1.4.3";
 vendor = "Makino";
 vendorUrl = "https://www.makino.com/";
 legal = "Copyright (C) 2012-2026 by Autodesk, Inc.";
@@ -3667,6 +3668,13 @@ function approach(value) {
 }
 // <<<<< INCLUDED FROM include_files/probeCycles_renishaw.cpi
 // Makino EasySet WCS: S1=G54, S2=G55, S3=G56, etc.
+// O9012 treats a G170 block with no S word at all as S1 (its own hardcoded
+// "#28=1 DEFAULT WORK OFFSET" fallback, not "leave WCS alone") - so a probe
+// operation with no WCS to update (e.g. a Probe Geometry / feature-tolerance
+// inspection, which has no work offset UI at all) must still send S0
+// explicitly. O9401's results routine checks S==0 to skip its WCS-write call
+// and run tolerance-check-only; omitting S here silently overwrote G54 on
+// every run instead.
 function getMakinoWCS() {
   if (currentSection.strategy == "probe") {
     var nextWorkOffset = hasNextSection() ? getNextSection().workOffset == 0 ? 1 : getNextSection().workOffset : -1;
@@ -3675,7 +3683,7 @@ function getMakinoWCS() {
     }
     return "S" + currentSection.probeWorkOffset;
   }
-  return "";
+  return "S0";
 }
 
 // Corner number from approach directions: B1=Lower-Left, B2=Upper-Left, B3=Upper-Right, B4=Lower-Right

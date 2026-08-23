@@ -10,6 +10,7 @@
   FORKID {97D024CD-3FC3-4161-8BA2-06EA3E072945}
 
   CHANGELOG:
+  V1.5.0 - 2026-08-23 - IAL: M965 (V1.4.9) did not fix alarm 320000 either - confirmed on the real machine, second probe cycle in a program still fails. Added forceToolChangeBeforeEachProbePoint (default true, "test" property) which forces an M06 tool change to the same tool before every probe point's protected approach - a much heavier reset than a dwell or M965, going through the machine's real, already-relied-on tool-change sequence rather than guessing at what O9424 needs cleared. Explicitly a diagnostic test, not a confirmed fix, per its property description - report back whether it works before this is trusted or narrowed down.
   V1.4.9 - 2026-08-23 - IAL: Narrowed down alarm 320000 further with two real-machine tests: it fails on the SECOND probe cycle in a program regardless of cycle type (confirmed with two Z-surface probes back to back, not just Z-then-X), and it does NOT clear no matter how long the machine sits at an inserted M0 between the two cycles - ruling out the V1.4.8 settle-dwell theory (not a timing issue; #3012 in O9424 evidently isn't a clock that advances while stopped). This is state left over from the first probe cycle that a second cycle needs canceled and isn't getting - most likely O9424's "recently armed, skip re-handshake" shortcut wrongly treating the second cycle as still armed after M910 already powered the interface back down. Rather than write directly to O9424's #3012/#112 (undocumented here, same category of guess that caused the S0 incident), protectedProbeMove() now sends M965 - the machine's own already-used "CANCEL M966" code (see O9424, and O9012's own ending sequence) - before every point's first protected move, to force a clean cancel using a documented mechanism instead of poking at raw macro variables. Verify on the machine.
   V1.4.8 - 2026-08-23 - IAL: Alarm 320000 confirmed NOT a hardware/position issue - the real machine test showed the exact same X-surface probe cycle posts and runs fine by itself, but fails with the same alarm when it immediately follows a Z-surface probe cycle in the same program. This is state carried over from the prior probe cycle into O9424's "recently armed, skip re-handshake" shortcut (the #3012/#112 check inside O9424, RENISHAW SETTINGS) - the post cannot see or safely modify that internal state directly (that's exactly the kind of blind common-variable guess that caused the S0/EXT-offset incident), so instead added a new probeHandshakeSettleDwell property (default 0, off) that inserts a plain G04 dwell before every protected probe move, to test whether forcing a real settle gap between consecutive probe cycles avoids the stale-handshake condition. This is a diagnostic/mitigation to verify on the machine, not a root-cause fix - see protectedProbeMove() and the property description.
   V1.4.7 - 2026-08-22 - IAL: Fixed Makino alarm 320000 (probe communication error), confirmed on the real machine occurring on a protected approach move with nothing near the part - ruling out a genuine near-collision (that's O9510's own PATH OBSTRUCTED, #3000=86). Traced to O9424 (RENISHAW SETTINGS), called at the start of every G65 P9510 and every touch: it re-arms the probe interface via M966, a 0.5s dwell, and a status poll retried up to 4x. writeProbeCycle() was calling protectedProbeMove() twice per probe point - once unconditionally before the cycle-type switch, then again (to a closer target) inside every case of the switch - doubling how often that handshake fires per point for zero collision-protection benefit, since a single G65 P9510 call already protects its entire commanded travel via G31, not just its final leg. Removed the redundant leading call; each case's own call still fully protects the approach.
@@ -25,7 +26,7 @@
   V1.3.1 - 2026-03-09 - IAL: Added M77 air-through-tool coolant support
 */
 
-description = "Makino V33 3-axis V1.4.9";
+description = "Makino V33 3-axis V1.5.0";
 vendor = "Makino";
 vendorUrl = "https://www.makino.com/";
 legal = "Copyright (C) 2012-2026 by Autodesk, Inc.";
@@ -240,6 +241,14 @@ properties = {
     group      : "probing",
     type       : "number",
     value      : 0,
+    scope      : "post"
+  },
+  forceToolChangeBeforeEachProbePoint: {
+    title      : "Force tool change before each probe point (test)",
+    description: "Diagnostic test for Makino alarm 320000 (probe communication error). Confirmed on the real machine: the SECOND probe cycle in a program always alarms (any cycle type - two Z-surface probes back to back reproduces it, not just Z-then-X), the first never does, waiting at an inserted M0 between cycles does not clear it, and sending M965 (CANCEL M966) before the second cycle did not fix it either. This tests a heavier reset: force an M06 tool change to the same tool (T<current>) before every probe point's protected approach, going through the machine's real tool-change sequence instead of guessing at what O9424 needs cleared. Not a confirmed fix - verify on the machine. If it works, this can likely be narrowed to skip the first point (which already works) rather than forcing it everywhere.",
+    group      : "probing",
+    type       : "boolean",
+    value      : true,
     scope      : "post"
   }
 };
@@ -3756,6 +3765,18 @@ function protectedProbeMove(_cycle, x, y, z) {
   var settleDwell = getProperty("probeHandshakeSettleDwell");
   if (settleDwell > 0) {
     onDwell(settleDwell); // see probeHandshakeSettleDwell property - alarm 320000 mitigation/test
+  }
+  if (getProperty("forceToolChangeBeforeEachProbePoint")) {
+    // Test for alarm 320000: M965 alone (see below) did not fix a second probe
+    // cycle failing in the same program. Forcing an M06 tool change to the SAME
+    // tool before every probe point is a much heavier reset than M965 or a dwell -
+    // it goes through the machine's real tool-change sequence (which this post
+    // already relies on elsewhere, e.g. onSection's normal tool change and the
+    // next-tool preload T-call) instead of guessing at what specifically needs
+    // to be cleared. This is a diagnostic test, not a confirmed fix - verify on
+    // the machine, and if it works, we can narrow it down to only the points
+    // that actually need it rather than every point.
+    writeToolBlock("T" + toolFormat.format(tool.number), mFormat.format(6));
   }
   // M965 is the machine's own, already-used "CANCEL M966" code (see O9424 and
   // O9012's own ending sequence) - M966 is what actually arms the probe interface.

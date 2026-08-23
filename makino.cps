@@ -10,6 +10,7 @@
   FORKID {97D024CD-3FC3-4161-8BA2-06EA3E072945}
 
   CHANGELOG:
+  V1.4.8 - 2026-08-23 - IAL: Alarm 320000 confirmed NOT a hardware/position issue - the real machine test showed the exact same X-surface probe cycle posts and runs fine by itself, but fails with the same alarm when it immediately follows a Z-surface probe cycle in the same program. This is state carried over from the prior probe cycle into O9424's "recently armed, skip re-handshake" shortcut (the #3012/#112 check inside O9424, RENISHAW SETTINGS) - the post cannot see or safely modify that internal state directly (that's exactly the kind of blind common-variable guess that caused the S0/EXT-offset incident), so instead added a new probeHandshakeSettleDwell property (default 0, off) that inserts a plain G04 dwell before every protected probe move, to test whether forcing a real settle gap between consecutive probe cycles avoids the stale-handshake condition. This is a diagnostic/mitigation to verify on the machine, not a root-cause fix - see protectedProbeMove() and the property description.
   V1.4.7 - 2026-08-22 - IAL: Fixed Makino alarm 320000 (probe communication error), confirmed on the real machine occurring on a protected approach move with nothing near the part - ruling out a genuine near-collision (that's O9510's own PATH OBSTRUCTED, #3000=86). Traced to O9424 (RENISHAW SETTINGS), called at the start of every G65 P9510 and every touch: it re-arms the probe interface via M966, a 0.5s dwell, and a status poll retried up to 4x. writeProbeCycle() was calling protectedProbeMove() twice per probe point - once unconditionally before the cycle-type switch, then again (to a closer target) inside every case of the switch - doubling how often that handshake fires per point for zero collision-protection benefit, since a single G65 P9510 call already protects its entire commanded travel via G31, not just its final leg. Removed the redundant leading call; each case's own call still fully protects the approach.
   V1.4.6 - 2026-08-22 - IAL: V1.4.2's protected retract after a probe cycle (G65 P9510, using G31 skip) caused a real probe communication error on the machine, occurring right after a successful Z touch (offset write still completed first). Root cause confirmed against the real machine's own O9511 (RENISHAW XYZ MEASURE) macro: it always retracts off a touch with a plain G01, in both its normal and fault paths, never G31 again - G31 re-arms the probe's skip/trigger circuit, and doing that again immediately after a touch, before the interface resets, is what breaks communication. onCycleEnd() now retracts with a plain G00 after a probe cycle, matching the machine's own macro. protectedProbeMove() (the approach move before G170 activates, which is what was originally reported as unsafe) is unaffected - it moves toward the part before any touch has happened, which is a different situation.
   V1.4.5 - 2026-08-22 - IAL: G170/O9012 has no "check only" mode at all (confirmed by direct, motion-free MDI testing of O9432: S0 writes the EXT/common offset, not a skip - and omitting S was already confirmed to default to S1/G54). Since every valid S writes a real register, inspection-only probe cycles (e.g. Probe Geometry / feature-tolerance checks) now target a dedicated new "Inspection-only scratch work offset" property (inspectionScratchWorkOffset, default S6/G59) instead of erroring out - this offset must never be used for actual part machining. The tolerance check/alarm (O9401) is unaffected either way and still runs regardless of the S value.
@@ -23,7 +24,7 @@
   V1.3.1 - 2026-03-09 - IAL: Added M77 air-through-tool coolant support
 */
 
-description = "Makino V33 3-axis V1.4.7";
+description = "Makino V33 3-axis V1.4.8";
 vendor = "Makino";
 vendorUrl = "https://www.makino.com/";
 legal = "Copyright (C) 2012-2026 by Autodesk, Inc.";
@@ -230,6 +231,14 @@ properties = {
     group      : "probing",
     type       : "integer",
     value      : 6,
+    scope      : "post"
+  },
+  probeHandshakeSettleDwell: {
+    title      : "Probe handshake settle dwell (seconds)",
+    description: "Diagnostic/mitigation for Makino alarm 320000 (probe communication error). O9424 (RENISHAW SETTINGS), which every protected move (O9510) and every touch (O9511) calls first, has a shortcut that skips re-arming the probe interface (M966 + 0.5s dwell + status poll) if it thinks this was 'recently done' - confirmed on the real machine that alarm 320000 can occur on a probe cycle immediately following a different probe cycle in the same program (e.g. an X-surface probe right after a Z-surface probe), even though the exact same X probe posted and run by itself works fine - i.e. this is state carried over from the prior probe cycle, not a hardware/position issue. Setting this above 0 inserts a G04 dwell before every protected probe move, to test/mitigate that stale-state condition. Not a confirmed fix - the exact meaning of O9424's internal state (which this post cannot see or safely poke at directly) is undocumented here; verify on the machine before relying on it. 0 disables it (no change from prior behavior).",
+    group      : "probing",
+    type       : "number",
+    value      : 0,
     scope      : "post"
   }
 };
@@ -3743,6 +3752,10 @@ function protectedProbeMove(_cycle, x, y, z) {
   // only carried over between calls through its own internal fallback (#117),
   // which is set from a previous P9510 call. Force the F word on every call so
   // it is never silently dropped by feedOutput's own modal suppression.
+  var settleDwell = getProperty("probeHandshakeSettleDwell");
+  if (settleDwell > 0) {
+    onDwell(settleDwell); // see probeHandshakeSettleDwell property - alarm 320000 mitigation/test
+  }
   var macroCall = settings.probing.macroCall;
   var _x = xOutput.format(x);
   var _y = yOutput.format(y);

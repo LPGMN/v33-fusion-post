@@ -10,6 +10,9 @@
   FORKID {97D024CD-3FC3-4161-8BA2-06EA3E072945}
 
   CHANGELOG:
+  V1.6.0 - 2026-08-23 - IAL: Found the real root cause of Makino alarm 320000 (probe communication error) via a public forum thread (eMastercam, "Renishaw Easyset cycles", corroborated by practicalmachinist.com thread 382013): G170/O9012 (RENISHAW EASYSET) is a thin, one-shot wrapper meant for a human jogging the probe and triggering ONE measurement from MDI - "the Easyset macros use the inspection plus macros on the back end... adds a simple MDI one line execution of inspection plus routines" - it was never designed to be re-entered automatically multiple times in one program. That matches every symptom seen: works on the first probe activation, fails on every automated subsequent one regardless of cycle type/order, unaffected by dwells (1s and 15s) or M965/forced-toolchange mitigations, and never fails in single-block (operator-paced stepping recreates the manual/MDI trigger pattern EasySet expects).
+  Single-surface probes (probing-x/-y/-z) now call the underlying Inspection Plus macro (O9511, RENISHAW XYZ MEASURE) directly instead of going through G170/O9012 - see writeInspectionPlusSurfaceProbe(), traced directly against O9012's own SET SURF X/Y/Z branches to replicate its post-touch offset-write follow-up (O9012 never passes S into O9511 either, so it does its own explicit G65P9432 call afterward - this does the same) while using the real CAD-nominal touch position from Fusion as the target instead of O9012's own "current position +/- standoff" default, which is more correct for programmed/automated probing. protectedProbeMove() (O9510, a core Inspection Plus macro, not EasySet-specific) is unchanged - repeated calls to it were never actually implicated by the evidence, only G170/O9012 was. The V1.4.8/V1.5.0 dwell and forced-toolchange mitigation properties are left in place, defaulted off, as fallback knobs for the cycle types not yet converted (bore/boss/pocket/web/corner/etc., still going through G170) in case they show the same alarm.
+  This is a significant, newly-written code path - verify carefully on the machine before trusting it in production, starting with the same Z,Z / Z,X consecutive-cycle tests that reproduced alarm 320000.
   V1.5.2 - 2026-08-23 - IAL: V1.5.1's 1s dwell did not fix alarm 320000 (confirmed on the real machine, still fails in continuous mode). Found the likely real mechanism: a documented practicalmachinist.com case (thread 382013) of a Renishaw spindle probe throwing the same "Probe Startup Failure" class of alarm on consecutive probe cycles, caused by the OMP/OMI receiver's switch-off method being set to a fixed inactivity timeout (their case: 12 seconds) rather than explicit optical on/off - the real fix there was reconfiguring that receiver setting, not a dwell. Bumped probeHandshakeSettleDwell's default to 15s (intentionally past their proven 12s minimum) to properly test this theory before touching any hardware configuration - a 1s test proves nothing here. See the property description for what to do next depending on the result.
   V1.5.1 - 2026-08-23 - IAL: New decisive evidence on alarm 320000 from the real machine: it does NOT occur in single-block mode, only in continuous/auto - and single-block's only real difference is forcing a hard stop-and-confirm between every block. That points at a block-overlap/look-ahead gap (the control starting the next block before an M-code's completion, e.g. M965/M06/M966, is actually confirmed by the PMC) rather than the "needs more elapsed time" theory the M0 test already ruled out. probeHandshakeSettleDwell (added V1.4.8) was placed BEFORE the M-codes, which could never have tested this - moved it to fire AFTER M965/the forced tool change and immediately before the protected move, and defaulted it to 1 second so this is what gets tested next. Verify on the machine in continuous mode specifically (single-block already doesn't show the alarm, so it won't tell you if this worked).
   V1.5.0 - 2026-08-23 - IAL: M965 (V1.4.9) did not fix alarm 320000 either - confirmed on the real machine, second probe cycle in a program still fails. Added forceToolChangeBeforeEachProbePoint (default true, "test" property) which forces an M06 tool change to the same tool before every probe point's protected approach - a much heavier reset than a dwell or M965, going through the machine's real, already-relied-on tool-change sequence rather than guessing at what O9424 needs cleared. Explicitly a diagnostic test, not a confirmed fix, per its property description - report back whether it works before this is trusted or narrowed down.
@@ -28,7 +31,7 @@
   V1.3.1 - 2026-03-09 - IAL: Added M77 air-through-tool coolant support
 */
 
-description = "Makino V33 3-axis V1.5.2";
+description = "Makino V33 3-axis V1.6.0";
 vendor = "Makino";
 vendorUrl = "https://www.makino.com/";
 legal = "Copyright (C) 2012-2026 by Autodesk, Inc.";
@@ -239,18 +242,18 @@ properties = {
   },
   probeHandshakeSettleDwell: {
     title      : "Probe handshake settle dwell (seconds)",
-    description: "Diagnostic/mitigation for Makino alarm 320000 (probe communication error) on the second-or-later probe cycle in a program. A 1s dwell here did not fix it (see V1.5.1) - but this is a known Renishaw spindle-probe issue elsewhere (see practicalmachinist.com thread 382013, 'Renishaw Probe, Setting Multiple Offsets Sequentially, Needs a Dwell?'): an OMP/OMI-family receiver with switch-off method set to a fixed inactivity timeout (their case: 12 seconds) throws the same 'Probe Startup Failure' class of alarm on a second probe cycle unless enough real dwell time passes for the receiver to fully time out and cleanly restart. That thread's real fix was reconfiguring the receiver's switch-off method (timeout vs explicit optical on/off) - a hardware/interface setting outside this post's control - the dwell is only a way to confirm/work around it in the meantime. Defaulted to 15s (intentionally past their proven 12s minimum) to properly test this theory - verify running in continuous/auto mode specifically (single-block already doesn't show the alarm here). If 15s fixes it, that confirms a timeout-based switch-off and the receiver setting should be corrected instead of living with this dwell long-term; if it does NOT fix it, this specific theory is also ruled out. 0 disables it (no dwell).",
+    description: "Diagnostic/mitigation for Makino alarm 320000 (probe communication error) on the second-or-later probe cycle in a program, from before the real root cause was found. Neither a 1s nor a 15s dwell here fixed it. Root cause (confirmed via a public forum thread on eMastercam, 'Renishaw Easyset cycles', corroborated by practicalmachinist.com thread 382013): G170/O9012 (RENISHAW EASYSET) is a one-shot wrapper meant for a single manually-triggered MDI measurement, not for repeated automated calls in one program - see writeInspectionPlusSurfaceProbe(), which now calls the underlying Inspection Plus macro (O9511) directly for single-surface probes instead of going through G170, avoiding this class of alarm entirely rather than working around it with a dwell. Left in place (default 0/off) only as a fallback knob for cycle types that still go through G170 (bore/boss/pocket/web/corner/etc., not yet converted) if they exhibit the same alarm.",
     group      : "probing",
     type       : "number",
-    value      : 15,
+    value      : 0,
     scope      : "post"
   },
   forceToolChangeBeforeEachProbePoint: {
     title      : "Force tool change before each probe point (test)",
-    description: "Diagnostic test for Makino alarm 320000 (probe communication error). Confirmed on the real machine: the SECOND probe cycle in a program always alarms (any cycle type - two Z-surface probes back to back reproduces it, not just Z-then-X), the first never does, waiting at an inserted M0 between cycles does not clear it, and sending M965 (CANCEL M966) before the second cycle did not fix it either. This tests a heavier reset: force an M06 tool change to the same tool (T<current>) before every probe point's protected approach, going through the machine's real tool-change sequence instead of guessing at what O9424 needs cleared. Not a confirmed fix - verify on the machine. If it works, this can likely be narrowed to skip the first point (which already works) rather than forcing it everywhere.",
+    description: "Diagnostic test for Makino alarm 320000 (probe communication error), from before the real root cause was found. Did not fix it. Root cause (confirmed via a public forum thread on eMastercam, 'Renishaw Easyset cycles', corroborated by practicalmachinist.com thread 382013): G170/O9012 (RENISHAW EASYSET) is a one-shot wrapper meant for a single manually-triggered MDI measurement, not for repeated automated calls in one program - see writeInspectionPlusSurfaceProbe(), which now calls the underlying Inspection Plus macro (O9511) directly for single-surface probes instead of going through G170, avoiding this class of alarm entirely rather than working around it with a forced tool change. Left in place (default false/off) only as a fallback knob for cycle types that still go through G170 (bore/boss/pocket/web/corner/etc., not yet converted) if they exhibit the same alarm.",
     group      : "probing",
     type       : "boolean",
-    value      : true,
+    value      : false,
     scope      : "post"
   }
 };
@@ -3489,7 +3492,75 @@ function writeEasysetProbeBlock(nWord) {
 }
 
 /*
-  O9012 required calling N-word per cycle (N-word = branch # x 10):
+  Calls the underlying Inspection Plus macro (O9511, RENISHAW XYZ MEASURE)
+  directly for a single-surface probe, instead of going through G170/O9012
+  (RENISHAW EASYSET).
+
+  Confirmed via a public forum thread (eMastercam, "Renishaw Easyset
+  cycles", and corroborated by practicalmachinist.com thread 382013):
+  EasySet is a thin, one-shot wrapper meant for a human jogging the probe
+  and triggering ONE measurement from MDI - "The Easyset macros use the
+  inspection plus macros on the back end... adds a simple MDI one line
+  execution of inspection plus routines." It was never designed to be
+  re-entered automatically multiple times in one program. That matches
+  every symptom of Makino alarm 320000 exactly: works on the first probe
+  activation in a program, fails on every automated subsequent one
+  regardless of cycle type or order, unaffected by dwells or cancel/rearm
+  M-codes, and never fails in single-block - because an operator pressing
+  cycle-start between every block recreates the manual/MDI-paced trigger
+  pattern EasySet expects. The documented fix is to call the lower-level
+  Inspection Plus macros directly for multiple sequential probe cycles,
+  which is what this function does for the single-surface probe types.
+
+  Traced directly against O9012's own N11/N13/N16 branches (SET SURF
+  X/Y/Z) to replicate what it does after computing its own target:
+    - O9012 computes its target from CURRENT POSITION +/- a fixed
+      standoff (#5041+-#30) - a rough default appropriate for "jog close,
+      then measure", not the actual CAD-nominal position. We have the
+      real nominal touch coordinate from Fusion (the same value already
+      used to compute the protected approach), so we pass that directly
+      instead - this is more correct for programmed/automated probing,
+      not just a substitution.
+    - O9012 never passes S to O9511 - #19 is undefined inside O9511's
+      (and O9401's, since O9401 is called via M98 sharing scope) local
+      variables, so O9401's own conditional offset write is skipped.
+      O9012 compensates with its own explicit follow-up call
+      (G65P9432S#19W1.<axis>1.) after O9511 returns, using the axis
+      error O9511 left in the shared common variables (#140/#141/#142
+      for X/Y/Z). This function does the same follow-up call.
+    - O9012 does not pass Q; it defaults #17 to #27*#129 (10 in inch
+      mode - confirmed this machine runs in inch/G20). We pass that same
+      default explicitly rather than relying on O9511 defaulting it
+      (which it does not do - Q would reach the touch sub-macro as 0/
+      undefined if omitted).
+    - O9511 determines search direction itself, from the sign of
+      (target - current position) at call time - not from a separate
+      N50-vs-N60-style selector. As long as the protected approach put
+      the probe on the correct side (which it already does, unchanged),
+      no direction argument is needed here.
+    - This intentionally does NOT pass U/H/M/T tolerance words - O9401's
+      tolerance checks are already unused today (none of these reach it
+      via G170 either), so behavior there is unchanged by this switch;
+      wiring up real tolerance checking is a separate, tracked gap.
+
+  Scoped to single-surface probes (probing-x/-y/-z) only - the cycle
+  types actually exercised by the alarm 320000 testing. Bore/boss/
+  pocket/web/corner/etc. still go through G170/O9012 and would need
+  their own, more involved translation (O9012 accumulates multiple
+  O9511/O9512/etc. results into #140/#141/#142 before one final
+  G65P9432 call) - not attempted here.
+*/
+function writeInspectionPlusSurfaceProbe(axisLetter, target) {
+  var macroCall = settings.probing.macroCall;
+  writeBlock(macroCall, "P9511", axisLetter + xyzFormat.format(target), "Q" + xyzFormat.format(10));
+  writeBlock(macroCall, "P9432", getMakinoWCS(), "W1.", axisLetter + "1.");
+}
+
+/*
+  O9012 required calling N-word per cycle (N-word = branch # x 10). NOTE:
+  probing-x/-y/-z (single surface) no longer go through G170/O9012 at all -
+  see writeInspectionPlusSurfaceProbe() - so N50/N60/N70/N80/N90 below are
+  listed for reference only and are no longer forced by this post:
     N10  BORE                  (D, no Z)
     N20  BOSS                  (D + Z)
     N30  X/Y POCKET            (X or Y, no Z)
@@ -3554,15 +3625,15 @@ function writeProbeCycle(cycle, x, y, z, P, F) {
   // than silently emitting a wrong-direction move (see approach()'s validate).
   case "probing-x":
     protectedProbeMove(cycle, x, y, z - cycle.depth);
-    writeEasysetProbeBlock(approach(cycle.approach1) > 0 ? 50 : 60, "G170", "X" + xyzFormat.format(0), getMakinoWCS());
+    writeInspectionPlusSurfaceProbe("X", x);
     break;
   case "probing-y":
     protectedProbeMove(cycle, x, y, z - cycle.depth);
-    writeEasysetProbeBlock(approach(cycle.approach1) > 0 ? 70 : 80, "G170", "Y" + xyzFormat.format(0), getMakinoWCS());
+    writeInspectionPlusSurfaceProbe("Y", y);
     break;
   case "probing-z":
     protectedProbeMove(cycle, x, y, Math.min(z - cycle.depth + cycle.probeClearance, cycle.retract));
-    writeEasysetProbeBlock(90, "G170", "Z" + xyzFormat.format(0), getMakinoWCS());
+    writeInspectionPlusSurfaceProbe("Z", z - cycle.depth);
     break;
   // ── Webs (external walls, X/Y + Z) ──────────────────────────────────────────
   case "probing-x-wall":

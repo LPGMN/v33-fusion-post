@@ -10,6 +10,7 @@
   FORKID {97D024CD-3FC3-4161-8BA2-06EA3E072945}
 
   CHANGELOG:
+  V1.5.1 - 2026-08-23 - IAL: New decisive evidence on alarm 320000 from the real machine: it does NOT occur in single-block mode, only in continuous/auto - and single-block's only real difference is forcing a hard stop-and-confirm between every block. That points at a block-overlap/look-ahead gap (the control starting the next block before an M-code's completion, e.g. M965/M06/M966, is actually confirmed by the PMC) rather than the "needs more elapsed time" theory the M0 test already ruled out. probeHandshakeSettleDwell (added V1.4.8) was placed BEFORE the M-codes, which could never have tested this - moved it to fire AFTER M965/the forced tool change and immediately before the protected move, and defaulted it to 1 second so this is what gets tested next. Verify on the machine in continuous mode specifically (single-block already doesn't show the alarm, so it won't tell you if this worked).
   V1.5.0 - 2026-08-23 - IAL: M965 (V1.4.9) did not fix alarm 320000 either - confirmed on the real machine, second probe cycle in a program still fails. Added forceToolChangeBeforeEachProbePoint (default true, "test" property) which forces an M06 tool change to the same tool before every probe point's protected approach - a much heavier reset than a dwell or M965, going through the machine's real, already-relied-on tool-change sequence rather than guessing at what O9424 needs cleared. Explicitly a diagnostic test, not a confirmed fix, per its property description - report back whether it works before this is trusted or narrowed down.
   V1.4.9 - 2026-08-23 - IAL: Narrowed down alarm 320000 further with two real-machine tests: it fails on the SECOND probe cycle in a program regardless of cycle type (confirmed with two Z-surface probes back to back, not just Z-then-X), and it does NOT clear no matter how long the machine sits at an inserted M0 between the two cycles - ruling out the V1.4.8 settle-dwell theory (not a timing issue; #3012 in O9424 evidently isn't a clock that advances while stopped). This is state left over from the first probe cycle that a second cycle needs canceled and isn't getting - most likely O9424's "recently armed, skip re-handshake" shortcut wrongly treating the second cycle as still armed after M910 already powered the interface back down. Rather than write directly to O9424's #3012/#112 (undocumented here, same category of guess that caused the S0 incident), protectedProbeMove() now sends M965 - the machine's own already-used "CANCEL M966" code (see O9424, and O9012's own ending sequence) - before every point's first protected move, to force a clean cancel using a documented mechanism instead of poking at raw macro variables. Verify on the machine.
   V1.4.8 - 2026-08-23 - IAL: Alarm 320000 confirmed NOT a hardware/position issue - the real machine test showed the exact same X-surface probe cycle posts and runs fine by itself, but fails with the same alarm when it immediately follows a Z-surface probe cycle in the same program. This is state carried over from the prior probe cycle into O9424's "recently armed, skip re-handshake" shortcut (the #3012/#112 check inside O9424, RENISHAW SETTINGS) - the post cannot see or safely modify that internal state directly (that's exactly the kind of blind common-variable guess that caused the S0/EXT-offset incident), so instead added a new probeHandshakeSettleDwell property (default 0, off) that inserts a plain G04 dwell before every protected probe move, to test whether forcing a real settle gap between consecutive probe cycles avoids the stale-handshake condition. This is a diagnostic/mitigation to verify on the machine, not a root-cause fix - see protectedProbeMove() and the property description.
@@ -26,7 +27,7 @@
   V1.3.1 - 2026-03-09 - IAL: Added M77 air-through-tool coolant support
 */
 
-description = "Makino V33 3-axis V1.5.0";
+description = "Makino V33 3-axis V1.5.1";
 vendor = "Makino";
 vendorUrl = "https://www.makino.com/";
 legal = "Copyright (C) 2012-2026 by Autodesk, Inc.";
@@ -237,10 +238,10 @@ properties = {
   },
   probeHandshakeSettleDwell: {
     title      : "Probe handshake settle dwell (seconds)",
-    description: "Diagnostic/mitigation for Makino alarm 320000 (probe communication error). O9424 (RENISHAW SETTINGS), which every protected move (O9510) and every touch (O9511) calls first, has a shortcut that skips re-arming the probe interface (M966 + 0.5s dwell + status poll) if it thinks this was 'recently done' - confirmed on the real machine that alarm 320000 can occur on a probe cycle immediately following a different probe cycle in the same program (e.g. an X-surface probe right after a Z-surface probe), even though the exact same X probe posted and run by itself works fine - i.e. this is state carried over from the prior probe cycle, not a hardware/position issue. Setting this above 0 inserts a G04 dwell before every protected probe move, to test/mitigate that stale-state condition. Not a confirmed fix - the exact meaning of O9424's internal state (which this post cannot see or safely poke at directly) is undocumented here; verify on the machine before relying on it. 0 disables it (no change from prior behavior).",
+    description: "Diagnostic/mitigation for Makino alarm 320000 (probe communication error) on the second-or-later probe cycle in a program. Ruled out on the real machine: it is not fixed by waiting (an inserted M0 between cycles, held indefinitely, does not clear it) and not fixed by M965 (CANCEL M966) alone. But it does NOT happen in single-block mode, only in continuous/auto - pointing at a block-overlap/look-ahead gap, where the control can start the next block before an M-code (M965, the forced tool change, or M966 inside O9424) is actually confirmed complete, and single-block's forced stop between blocks happens to prevent that. Setting this above 0 inserts a G04 dwell in protectedProbeMove() AFTER M965/the tool change and immediately before the protected move itself, to force that same gap in continuous mode. Not a confirmed fix - verify on the machine running in normal/continuous mode (not single-block, which already doesn't show the alarm and won't tell you if this worked). 0 disables it (no dwell).",
     group      : "probing",
     type       : "number",
-    value      : 0,
+    value      : 1,
     scope      : "post"
   },
   forceToolChangeBeforeEachProbePoint: {
@@ -3762,10 +3763,6 @@ function protectedProbeMove(_cycle, x, y, z) {
   // only carried over between calls through its own internal fallback (#117),
   // which is set from a previous P9510 call. Force the F word on every call so
   // it is never silently dropped by feedOutput's own modal suppression.
-  var settleDwell = getProperty("probeHandshakeSettleDwell");
-  if (settleDwell > 0) {
-    onDwell(settleDwell); // see probeHandshakeSettleDwell property - alarm 320000 mitigation/test
-  }
   if (getProperty("forceToolChangeBeforeEachProbePoint")) {
     // Test for alarm 320000: M965 alone (see below) did not fix a second probe
     // cycle failing in the same program. Forcing an M06 tool change to the SAME
@@ -3781,14 +3778,23 @@ function protectedProbeMove(_cycle, x, y, z) {
   // M965 is the machine's own, already-used "CANCEL M966" code (see O9424 and
   // O9012's own ending sequence) - M966 is what actually arms the probe interface.
   // Confirmed on the real machine: alarm 320000 hits the second probe cycle in a
-  // program (any cycle type, not just a specific one), never the first, and does
-  // NOT clear no matter how long you sit at an M0 in between - so it's not a
-  // timing/settle issue, it's state left over from the prior cycle that isn't
-  // being canceled before the next one tries to re-arm. Forcing M965 here, before
-  // every point's first protected move, cancels that leftover state using the
-  // machine's own documented mechanism instead of guessing at O9424's internal
-  // #3012/#112 bookkeeping directly.
+  // program (any cycle type, not just a specific one), never the first. It did NOT
+  // clear no matter how long the machine sat at an inserted M0 between the two
+  // cycles, and M965 alone (above) did not fix it either. But it does NOT happen
+  // at all in single-block mode - only in continuous/auto. That points away from
+  // "needs more real time to pass" (M0 already ruled that out) and toward a block-
+  // overlap/look-ahead issue: in continuous mode the control can start preparing/
+  // running the next block before an M-code's completion (M965, the forced M06
+  // above, or M966 inside O9424) is actually confirmed back from the PMC; single-
+  // block's forced stop-and-restart between every block happens to guarantee that
+  // confirmation, which is exactly the kind of gap a dwell placed AFTER the
+  // M-codes (not before, like probeHandshakeSettleDwell was originally placed)
+  // should paper over. See the property description for how to test this.
   writeBlock(mFormat.format(965));
+  var settleDwell = getProperty("probeHandshakeSettleDwell");
+  if (settleDwell > 0) {
+    onDwell(settleDwell); // forces a real gap between the M-codes above and the protected move below
+  }
   var macroCall = settings.probing.macroCall;
   var _x = xOutput.format(x);
   var _y = yOutput.format(y);

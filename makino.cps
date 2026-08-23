@@ -10,6 +10,7 @@
   FORKID {97D024CD-3FC3-4161-8BA2-06EA3E072945}
 
   CHANGELOG:
+  V1.6.1 - 2026-08-23 - IAL: Defaulted useSmoothing to Automatic (was Off) - confirmed on the real machine that milling without AICC (G05.1) active could not keep up with a dense Adaptive Clearing toolpath (many short segments, tight-radius arcs), causing the tool to overshoot/plunge into the part between linking moves. This was unrelated to any probing work above - onRapid/onLinear (used by Adaptive and all other milling) were never touched by any of it. See useSmoothing's property description for the reasoning and the corroborating evidence from the probe macros' own G05.1 Q0/Q1 usage.
   V1.6.0 - 2026-08-23 - IAL: Found the real root cause of Makino alarm 320000 (probe communication error) via a public forum thread (eMastercam, "Renishaw Easyset cycles", corroborated by practicalmachinist.com thread 382013): G170/O9012 (RENISHAW EASYSET) is a thin, one-shot wrapper meant for a human jogging the probe and triggering ONE measurement from MDI - "the Easyset macros use the inspection plus macros on the back end... adds a simple MDI one line execution of inspection plus routines" - it was never designed to be re-entered automatically multiple times in one program. That matches every symptom seen: works on the first probe activation, fails on every automated subsequent one regardless of cycle type/order, unaffected by dwells (1s and 15s) or M965/forced-toolchange mitigations, and never fails in single-block (operator-paced stepping recreates the manual/MDI trigger pattern EasySet expects).
   Single-surface probes (probing-x/-y/-z) now call the underlying Inspection Plus macro (O9511, RENISHAW XYZ MEASURE) directly instead of going through G170/O9012 - see writeInspectionPlusSurfaceProbe(), traced directly against O9012's own SET SURF X/Y/Z branches to replicate its post-touch offset-write follow-up (O9012 never passes S into O9511 either, so it does its own explicit G65P9432 call afterward - this does the same) while using the real CAD-nominal touch position from Fusion as the target instead of O9012's own "current position +/- standoff" default, which is more correct for programmed/automated probing. protectedProbeMove() (O9510, a core Inspection Plus macro, not EasySet-specific) is unchanged - repeated calls to it were never actually implicated by the evidence, only G170/O9012 was. The V1.4.8/V1.5.0 dwell and forced-toolchange mitigation properties are left in place, defaulted off, as fallback knobs for the cycle types not yet converted (bore/boss/pocket/web/corner/etc., still going through G170) in case they show the same alarm.
   This is a significant, newly-written code path - verify carefully on the machine before trusting it in production, starting with the same Z,Z / Z,X consecutive-cycle tests that reproduced alarm 320000.
@@ -31,7 +32,7 @@
   V1.3.1 - 2026-03-09 - IAL: Added M77 air-through-tool coolant support
 */
 
-description = "Makino V33 3-axis V1.6.0";
+description = "Makino V33 3-axis V1.6.1";
 vendor = "Makino";
 vendorUrl = "https://www.makino.com/";
 legal = "Copyright (C) 2012-2026 by Autodesk, Inc.";
@@ -138,7 +139,7 @@ properties = {
   },
   useSmoothing: {
     title      : "Use smoothing",
-    description: "Defines the smoothing control mode (AICC/AIAPC). 'On' outputs G05.1 Q0/Q2 only, 'Automatic' or 'Level 1-10' outputs G05.1 Q2 with the R value for the desired level.",
+    description: "Defines the smoothing control mode (AICC/AIAPC). 'On' outputs G05.1 Q0/Q2 only, 'Automatic' or 'Level 1-10' outputs G05.1 Q2 with the R value for the desired level. Defaulted to Automatic (was Off) - confirmed on the real machine that milling without AICC active could not track a dense Adaptive Clearing toolpath (many short segments, tight-radius arcs) at its programmed feed, causing following-error overshoot into the part. The machine's own Renishaw probe macros (O9510/O9511) already assume AICC-on is the normal running state for this control - they explicitly cancel it (G05.1 Q0) only around their own G31 skip move and restore it (G05.1 Q1) immediately after.",
     group      : "preferences",
     type       : "enum",
     values     : [
@@ -156,7 +157,7 @@ properties = {
       {title:"Level 9", id:"9"},
       {title:"Level 10", id:"10"},
     ],
-    value: "-1",
+    value: "9999",
     scope: "post"
   },
   machiningMode: {

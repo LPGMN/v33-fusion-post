@@ -10,6 +10,26 @@
   FORKID {97D024CD-3FC3-4161-8BA2-06EA3E072945}
 
   CHANGELOG:
+  V1.6.6 - 2026-08-23 - IAL: V1.6.5's per-operation machining mode override used a custom post parameter ("machiningMode") that turned out not to correspond to anything visible in Fusion's UI (checked against the NC Program post-properties dialog, which only ever shows the post-wide property, as expected - custom per-operation post parameters are not exposed there and were never actually confirmed to exist as a UI affordance). Replaced with the standard Autodesk mechanism for this: a new machiningModeOverride property with scope:"operation" (previously every property in this post was scope:"post") instead of a guessed parameter name. This is NOT yet confirmed to render anywhere usable either - check the operation's own dialog after re-posting. If it doesn't show up anywhere usable, per-operation control needs a different mechanism entirely and this should not be relied on yet.
+  V1.6.5 - 2026-08-23 - IAL: Added per-operation override for machining mode (M250/M251/M252), see V1.6.6 - the parameter-based mechanism here did not work as described.
+  V1.6.4 - 2026-08-23 - IAL: Confirmed via the V1.6.3 cycle property dump on a real Probe Geometry (Z surface) operation: cycle.hasSizeTolerance, cycle.toleranceSize (0.04, matching the operation's "Size upper/lower" = +/-0.04 in), and cycle.wrongSizeAction ("STOP-MESSAGE"). Wired up real size-tolerance checking: writeInspectionPlusSurfaceProbe() now sends H<toleranceSize> to G65 P9511 when cycle.hasSizeTolerance is set, so O9401's real check runs (alarms "500 OUT OF TOL" if exceeded) instead of being silently skipped - closes the "just setting an offset, not comparing anything" gap for probing-x/-y/-z. cycle.hasPositionalTolerance was 0 in the same test, so the field name for an actual positional-tolerance value (O9401's M word) is still unconfirmed - not guessed, left for a future dump when a probe op with positional tolerance enabled needs it. Removed the V1.6.3 diagnostic dump now that the needed field names are confirmed.
+  V1.6.3 - 2026-08-23 - IAL: TEMPORARY diagnostic build - added dumpCycleForToleranceDiscovery(), called from the probing-x/-y/-z cases, which writes every property actually present on the Fusion `cycle` object as G-code comments. Purpose: the Probe Geometry operation's "Feature Tolerances" (Size upper/lower) are visible in Fusion's own UI, but the real `cycle` property name used to pass those values to this post is not documented anywhere available here - guessing at a name risks silently reading undefined and posting with no tolerance enforced while looking correct (the same failure mode as the earlier S0 incident). Re-post a Probe Geometry operation once with this build and read the property names/values out of the comments to confirm the real field before wiring up real tolerance checking. Remove the dump and its call sites once that's done - not meant to ship long-term.
+  V1.6.2 - 2026-08-23 - IAL: V1.6.1 (useSmoothing default to Automatic) exposed a latent bug in setSmoothing(): it emitted "G05.1 Q2 R<level>" (confirmed on the real machine as the exact line, "G05.1 Q2 R4", that immediately alarmed "IMPROPER G CODE"). This syntax was previously dead code since smoothing defaulted to Off. The machine's own resident macros (O9510/O9511) actively run G05.1 successfully on this exact control using only Q0 (off) and Q1 (on, no level word) - never Q2, never an R-level. setSmoothing() now emits that proven Q1/Q0 form unconditionally; the Level 1-10/Automatic property choices no longer affect the emitted code, since this control does not appear to support a specified smoothing level via G05.1.
+  V1.6.1 - 2026-08-23 - IAL: Defaulted useSmoothing to Automatic (was Off) - confirmed on the real machine that milling without AICC (G05.1) active could not keep up with a dense Adaptive Clearing toolpath (many short segments, tight-radius arcs), causing the tool to overshoot/plunge into the part between linking moves. This was unrelated to any probing work above - onRapid/onLinear (used by Adaptive and all other milling) were never touched by any of it. See useSmoothing's property description for the reasoning and the corroborating evidence from the probe macros' own G05.1 Q0/Q1 usage.
+  V1.6.0 - 2026-08-23 - IAL: Found the real root cause of Makino alarm 320000 (probe communication error) via a public forum thread (eMastercam, "Renishaw Easyset cycles", corroborated by practicalmachinist.com thread 382013): G170/O9012 (RENISHAW EASYSET) is a thin, one-shot wrapper meant for a human jogging the probe and triggering ONE measurement from MDI - "the Easyset macros use the inspection plus macros on the back end... adds a simple MDI one line execution of inspection plus routines" - it was never designed to be re-entered automatically multiple times in one program. That matches every symptom seen: works on the first probe activation, fails on every automated subsequent one regardless of cycle type/order, unaffected by dwells (1s and 15s) or M965/forced-toolchange mitigations, and never fails in single-block (operator-paced stepping recreates the manual/MDI trigger pattern EasySet expects).
+  Single-surface probes (probing-x/-y/-z) now call the underlying Inspection Plus macro (O9511, RENISHAW XYZ MEASURE) directly instead of going through G170/O9012 - see writeInspectionPlusSurfaceProbe(), traced directly against O9012's own SET SURF X/Y/Z branches to replicate its post-touch offset-write follow-up (O9012 never passes S into O9511 either, so it does its own explicit G65P9432 call afterward - this does the same) while using the real CAD-nominal touch position from Fusion as the target instead of O9012's own "current position +/- standoff" default, which is more correct for programmed/automated probing. protectedProbeMove() (O9510, a core Inspection Plus macro, not EasySet-specific) is unchanged - repeated calls to it were never actually implicated by the evidence, only G170/O9012 was. The V1.4.8/V1.5.0 dwell and forced-toolchange mitigation properties are left in place, defaulted off, as fallback knobs for the cycle types not yet converted (bore/boss/pocket/web/corner/etc., still going through G170) in case they show the same alarm.
+  This is a significant, newly-written code path - verify carefully on the machine before trusting it in production, starting with the same Z,Z / Z,X consecutive-cycle tests that reproduced alarm 320000.
+  V1.5.2 - 2026-08-23 - IAL: V1.5.1's 1s dwell did not fix alarm 320000 (confirmed on the real machine, still fails in continuous mode). Found the likely real mechanism: a documented practicalmachinist.com case (thread 382013) of a Renishaw spindle probe throwing the same "Probe Startup Failure" class of alarm on consecutive probe cycles, caused by the OMP/OMI receiver's switch-off method being set to a fixed inactivity timeout (their case: 12 seconds) rather than explicit optical on/off - the real fix there was reconfiguring that receiver setting, not a dwell. Bumped probeHandshakeSettleDwell's default to 15s (intentionally past their proven 12s minimum) to properly test this theory before touching any hardware configuration - a 1s test proves nothing here. See the property description for what to do next depending on the result.
+  V1.5.1 - 2026-08-23 - IAL: New decisive evidence on alarm 320000 from the real machine: it does NOT occur in single-block mode, only in continuous/auto - and single-block's only real difference is forcing a hard stop-and-confirm between every block. That points at a block-overlap/look-ahead gap (the control starting the next block before an M-code's completion, e.g. M965/M06/M966, is actually confirmed by the PMC) rather than the "needs more elapsed time" theory the M0 test already ruled out. probeHandshakeSettleDwell (added V1.4.8) was placed BEFORE the M-codes, which could never have tested this - moved it to fire AFTER M965/the forced tool change and immediately before the protected move, and defaulted it to 1 second so this is what gets tested next. Verify on the machine in continuous mode specifically (single-block already doesn't show the alarm, so it won't tell you if this worked).
+  V1.5.0 - 2026-08-23 - IAL: M965 (V1.4.9) did not fix alarm 320000 either - confirmed on the real machine, second probe cycle in a program still fails. Added forceToolChangeBeforeEachProbePoint (default true, "test" property) which forces an M06 tool change to the same tool before every probe point's protected approach - a much heavier reset than a dwell or M965, going through the machine's real, already-relied-on tool-change sequence rather than guessing at what O9424 needs cleared. Explicitly a diagnostic test, not a confirmed fix, per its property description - report back whether it works before this is trusted or narrowed down.
+  V1.4.9 - 2026-08-23 - IAL: Narrowed down alarm 320000 further with two real-machine tests: it fails on the SECOND probe cycle in a program regardless of cycle type (confirmed with two Z-surface probes back to back, not just Z-then-X), and it does NOT clear no matter how long the machine sits at an inserted M0 between the two cycles - ruling out the V1.4.8 settle-dwell theory (not a timing issue; #3012 in O9424 evidently isn't a clock that advances while stopped). This is state left over from the first probe cycle that a second cycle needs canceled and isn't getting - most likely O9424's "recently armed, skip re-handshake" shortcut wrongly treating the second cycle as still armed after M910 already powered the interface back down. Rather than write directly to O9424's #3012/#112 (undocumented here, same category of guess that caused the S0 incident), protectedProbeMove() now sends M965 - the machine's own already-used "CANCEL M966" code (see O9424, and O9012's own ending sequence) - before every point's first protected move, to force a clean cancel using a documented mechanism instead of poking at raw macro variables. Verify on the machine.
+  V1.4.8 - 2026-08-23 - IAL: Alarm 320000 confirmed NOT a hardware/position issue - the real machine test showed the exact same X-surface probe cycle posts and runs fine by itself, but fails with the same alarm when it immediately follows a Z-surface probe cycle in the same program. This is state carried over from the prior probe cycle into O9424's "recently armed, skip re-handshake" shortcut (the #3012/#112 check inside O9424, RENISHAW SETTINGS) - the post cannot see or safely modify that internal state directly (that's exactly the kind of blind common-variable guess that caused the S0/EXT-offset incident), so instead added a new probeHandshakeSettleDwell property (default 0, off) that inserts a plain G04 dwell before every protected probe move, to test whether forcing a real settle gap between consecutive probe cycles avoids the stale-handshake condition. This is a diagnostic/mitigation to verify on the machine, not a root-cause fix - see protectedProbeMove() and the property description.
+  V1.4.7 - 2026-08-22 - IAL: Fixed Makino alarm 320000 (probe communication error), confirmed on the real machine occurring on a protected approach move with nothing near the part - ruling out a genuine near-collision (that's O9510's own PATH OBSTRUCTED, #3000=86). Traced to O9424 (RENISHAW SETTINGS), called at the start of every G65 P9510 and every touch: it re-arms the probe interface via M966, a 0.5s dwell, and a status poll retried up to 4x. writeProbeCycle() was calling protectedProbeMove() twice per probe point - once unconditionally before the cycle-type switch, then again (to a closer target) inside every case of the switch - doubling how often that handshake fires per point for zero collision-protection benefit, since a single G65 P9510 call already protects its entire commanded travel via G31, not just its final leg. Removed the redundant leading call; each case's own call still fully protects the approach.
+  V1.4.6 - 2026-08-22 - IAL: V1.4.2's protected retract after a probe cycle (G65 P9510, using G31 skip) caused a real probe communication error on the machine, occurring right after a successful Z touch (offset write still completed first). Root cause confirmed against the real machine's own O9511 (RENISHAW XYZ MEASURE) macro: it always retracts off a touch with a plain G01, in both its normal and fault paths, never G31 again - G31 re-arms the probe's skip/trigger circuit, and doing that again immediately after a touch, before the interface resets, is what breaks communication. onCycleEnd() now retracts with a plain G00 after a probe cycle, matching the machine's own macro. protectedProbeMove() (the approach move before G170 activates, which is what was originally reported as unsafe) is unaffected - it moves toward the part before any touch has happened, which is a different situation.
+  V1.4.5 - 2026-08-22 - IAL: G170/O9012 has no "check only" mode at all (confirmed by direct, motion-free MDI testing of O9432: S0 writes the EXT/common offset, not a skip - and omitting S was already confirmed to default to S1/G54). Since every valid S writes a real register, inspection-only probe cycles (e.g. Probe Geometry / feature-tolerance checks) now target a dedicated new "Inspection-only scratch work offset" property (inspectionScratchWorkOffset, default S6/G59) instead of erroring out - this offset must never be used for actual part machining. The tolerance check/alarm (O9401) is unaffected either way and still runs regardless of the S value.
+  V1.4.4 - 2026-08-22 - IAL: V1.4.3's S0 "fix" was itself unsafe - confirmed on the real machine that S0 does not make O9012/O9401 skip the work-offset write as their own code comments imply; it instead wrote into the EXT/common offset and caused a Z+ overtravel. getMakinoWCS() now errors out and refuses to post any probe cycle with no WCS to update (e.g. Probe Geometry / feature-tolerance inspection) until the correct machine-verified value is found. Do not reintroduce a guessed S value without confirming it against the real O9012/O9401/O9432 macros first.
+  V1.4.3 - 2026-08-22 - IAL: Fixed inspection-only probe cycles (e.g. Probe Geometry / feature-tolerance checks, which have no work-offset UI at all) silently overwriting G54 - getMakinoWCS() was omitting the S word for these, and O9012 treats a missing S as S1 (its own hardcoded default), not "leave WCS alone". Now sends S0 explicitly, which O9401 checks to run tolerance-check-only and skip the WCS write. See getMakinoWCS().
+  V1.4.2 - 2026-08-22 - IAL: Restored protected positioning (G65 P9510, confirmed present on the machine as O9510 "RENISHAW PROTECTED POSN") for probe approach/retract moves - G170/O9012 only monitors for contact once its own block executes, so the prior plain-G00 moves that bring the probe close to the part beforehand were unprotected. See protectedProbeMove().
   V1.4.1 - 2026-08-22 - IAL: Restored next-tool preload T-call on regular tool changes (COMMAND_LOAD_TOOL) - this is a required part of the post, not the source of the V1.3.2 issue; V1.3.2's removal was based on a misdiagnosis.
   V1.4.0 - 2026-08-21 - IAL: Fixed G170/O9012 EasySet probing - N-word was left to the auto sequence counter instead of being forced per cycle, causing FORMAT ERROR alarms or wrong probing cycles (see writeEasysetProbeBlock). Also forced M250 for all probe operations regardless of machiningMode.
   V1.3.3 - 2026-05-24 - IAL: Restored touchoff block; preload T-call kept inside touchoff loop only (needed for ATC sequencing), removed from regular tool changes
@@ -17,7 +37,7 @@
   V1.3.1 - 2026-03-09 - IAL: Added M77 air-through-tool coolant support
 */
 
-description = "Makino V33 3-axis V1.4.1";
+description = "Makino V33 3-axis V1.6.6";
 vendor = "Makino";
 vendorUrl = "https://www.makino.com/";
 legal = "Copyright (C) 2012-2026 by Autodesk, Inc.";
@@ -124,7 +144,7 @@ properties = {
   },
   useSmoothing: {
     title      : "Use smoothing",
-    description: "Defines the smoothing control mode (AICC/AIAPC). 'On' outputs G05.1 Q0/Q2 only, 'Automatic' or 'Level 1-10' outputs G05.1 Q2 with the R value for the desired level.",
+    description: "Defines the smoothing control mode (AICC/AIAPC). 'On' outputs G05.1 Q0/Q2 only, 'Automatic' or 'Level 1-10' outputs G05.1 Q2 with the R value for the desired level. Defaulted to Automatic (was Off) - confirmed on the real machine that milling without AICC active could not track a dense Adaptive Clearing toolpath (many short segments, tight-radius arcs) at its programmed feed, causing following-error overshoot into the part. The machine's own Renishaw probe macros (O9510/O9511) already assume AICC-on is the normal running state for this control - they explicitly cancel it (G05.1 Q0) only around their own G31 skip move and restore it (G05.1 Q1) immediately after.",
     group      : "preferences",
     type       : "enum",
     values     : [
@@ -142,12 +162,12 @@ properties = {
       {title:"Level 9", id:"9"},
       {title:"Level 10", id:"10"},
     ],
-    value: "-1",
+    value: "9999",
     scope: "post"
   },
   machiningMode: {
     title      : "Machining mode",
-    description: "Selects the Makino machining mode M-code output per operation. M251=High Efficiency/High Performance (roughing), M250=High Accuracy/General (machine default on power-on or reset), M252=Super-High Accuracy (finishing). 'Automatic' selects based on stock-to-leave per operation.",
+    description: "Selects the Makino machining mode M-code output. M251=High Efficiency/High Performance (roughing), M250=High Accuracy/General (machine default on power-on or reset), M252=Super-High Accuracy (finishing). 'Automatic' selects based on stock-to-leave per operation. This is the post-wide default - see machiningModeOverride to set this per-operation instead.",
     group      : "preferences",
     type       : "enum",
     values     : [
@@ -159,6 +179,22 @@ properties = {
     ],
     value: "off",
     scope: "post"
+  },
+  machiningModeOverride: {
+    title      : "Machining mode (this operation)",
+    description: "Per-operation override for Machining mode above. 'Use post default' (the default) means this operation follows the post-wide Machining mode property; any other choice here overrides it for this operation only. NOT YET CONFIRMED where Fusion renders an operation-scoped ('scope: operation') property in its UI for this Fusion version - check the operation's own dialog after re-posting to see if this control shows up there; if it doesn't appear anywhere usable, this needs a different mechanism and should not be relied on yet.",
+    group      : "preferences",
+    type       : "enum",
+    values     : [
+      {title:"Use post default", id:"default"},
+      {title:"Off (no output)", id:"off"},
+      {title:"M250 - High Accuracy (machine default)", id:"250"},
+      {title:"M251 - High Efficiency / High Performance", id:"251"},
+      {title:"M252 - Super-High Accuracy", id:"252"},
+      {title:"Automatic (by operation type)", id:"auto"}
+    ],
+    value: "default",
+    scope: "operation"
   },
   usePitchForTapping: {
     title      : "Use pitch for tapping",
@@ -216,6 +252,30 @@ properties = {
     group      : "probing",
     type       : "boolean",
     value      : true,
+    scope      : "post"
+  },
+  inspectionScratchWorkOffset: {
+    title      : "Inspection-only scratch work offset (S)",
+    description: "G170/O9012 (Renishaw EasySet) always writes its measurement into a work offset - there is no built-in 'check tolerance only, touch nothing' mode. Omitting S defaults to S1 (overwrites G54, confirmed on the real machine); S0 writes into the EXT/common offset instead (also confirmed on the real machine, caused a Z+ overtravel). So any probe cycle that isn't a genuine WCS-updating operation (e.g. Probe Geometry / feature-tolerance inspection) is instead pointed at this dedicated offset number (1=G54, 2=G55, ... 6=G59, 101+=extended G54.1 offsets). It MUST be a work offset that is never used for actual part machining on this machine - confirm this before changing it, since whatever number is set here gets silently overwritten by every inspection-only probe run.",
+    group      : "probing",
+    type       : "integer",
+    value      : 6,
+    scope      : "post"
+  },
+  probeHandshakeSettleDwell: {
+    title      : "Probe handshake settle dwell (seconds)",
+    description: "Diagnostic/mitigation for Makino alarm 320000 (probe communication error) on the second-or-later probe cycle in a program, from before the real root cause was found. Neither a 1s nor a 15s dwell here fixed it. Root cause (confirmed via a public forum thread on eMastercam, 'Renishaw Easyset cycles', corroborated by practicalmachinist.com thread 382013): G170/O9012 (RENISHAW EASYSET) is a one-shot wrapper meant for a single manually-triggered MDI measurement, not for repeated automated calls in one program - see writeInspectionPlusSurfaceProbe(), which now calls the underlying Inspection Plus macro (O9511) directly for single-surface probes instead of going through G170, avoiding this class of alarm entirely rather than working around it with a dwell. Left in place (default 0/off) only as a fallback knob for cycle types that still go through G170 (bore/boss/pocket/web/corner/etc., not yet converted) if they exhibit the same alarm.",
+    group      : "probing",
+    type       : "number",
+    value      : 0,
+    scope      : "post"
+  },
+  forceToolChangeBeforeEachProbePoint: {
+    title      : "Force tool change before each probe point (test)",
+    description: "Diagnostic test for Makino alarm 320000 (probe communication error), from before the real root cause was found. Did not fix it. Root cause (confirmed via a public forum thread on eMastercam, 'Renishaw Easyset cycles', corroborated by practicalmachinist.com thread 382013): G170/O9012 (RENISHAW EASYSET) is a one-shot wrapper meant for a single manually-triggered MDI measurement, not for repeated automated calls in one program - see writeInspectionPlusSurfaceProbe(), which now calls the underlying Inspection Plus macro (O9511) directly for single-surface probes instead of going through G170, avoiding this class of alarm entirely rather than working around it with a forced tool change. Left in place (default false/off) only as a fallback knob for cycle types that still go through G170 (bore/boss/pocket/web/corner/etc., not yet converted) if they exhibit the same alarm.",
+    group      : "probing",
+    type       : "boolean",
+    value      : false,
     scope      : "post"
   }
 };
@@ -514,24 +574,17 @@ function setSmoothing(mode) {
     validate(!state.lengthCompensationActive, "Length compensation is active while trying to update smoothing.");
   }
 
-  var useNanoSmoothing = false; // set to true use nano smoothing G5.1 Q3
+  // Confirmed on the real machine's own resident macros (O9510/O9511, RENISHAW
+  // PROTECTED POSN / XYZ MEASURE) which actively run G05.1 successfully on this
+  // exact control: they only ever use G05.1 Q0 (off) and G05.1 Q1 (on, no level
+  // word) - never Q2, never an R-level. Alarm "IMPROPER G CODE" appeared as soon
+  // as useSmoothing was turned on (defaulting to Automatic in V1.6.1), which
+  // used to be dead code while smoothing defaulted to Off - this was a latent
+  // bug in the generic Q2/R<level> syntax below, now replaced with the proven
+  // Q1/Q0 form. Level selection (Level 1-10, Automatic) no longer has any
+  // effect on the emitted code - this control does not appear to support it.
   if (mode) { // enable smoothing
-    if (getProperty("useSmoothing") == "0") {
-      writeBlock(gFormat.format(5.1), "Q2");
-    } else {
-      if (!useNanoSmoothing) {
-        writeBlock(gFormat.format(5.1), "Q2", "R" + smoothing.level);
-      } else {
-        writeBlock(
-          gFormat.format(5.1), "Q3",
-          "X0", "Y0", "Z0",
-          conditional(currentSection.isMultiAxis() && machineConfiguration.isMachineCoordinate(0), "A0"),
-          conditional(currentSection.isMultiAxis() && machineConfiguration.isMachineCoordinate(1), "B0"),
-          conditional(currentSection.isMultiAxis() && machineConfiguration.isMachineCoordinate(2), "C0"),
-          "R" + smoothing.level
-        );
-      }
-    }
+    writeBlock(gFormat.format(5.1), "Q1");
   } else { // disable smoothing
     writeBlock(gFormat.format(5.1), "Q0");
   }
@@ -666,7 +719,16 @@ function onCycleEnd() {
   if (isProbeOperation()) {
     zOutput.reset();
     gMotionModal.reset();
-    writeBlock(gMotionModal.format(0), zOutput.format(cycle.retract)); // retract after probe cycle
+    // Do NOT protect this move with G65 P9510 (G31 skip). Confirmed on the real
+    // machine's own O9511 (RENISHAW XYZ MEASURE): after a touch it always retracts
+    // with a plain G01, in both its normal and fault paths - never G31 again. G31
+    // re-arms the probe's skip/trigger circuit; issuing it again immediately after
+    // a touch, before the interface has reset from the trigger, caused a probe
+    // communication error on this machine (confirmed - error appeared right after
+    // a successful Z touch, occurring here). The part-collision risk this was meant
+    // to guard against doesn't apply here: the probe has already retracted off the
+    // triggering surface by the time this move to full cycle.retract height runs.
+    writeBlock(gMotionModal.format(0), zOutput.format(cycle.retract));
   } else {
     if (subprogramsAreSupported() && subprogramState.cycleSubprogramIsActive) {
       subprogramEnd();
@@ -1766,7 +1828,13 @@ function getCoolantCodes(coolant, format) {
 var currentMachiningMode = -1; // -1 = unknown/unset; forces output on first operation
 
 function setMachiningMode() {
-  var modeProp = getProperty("machiningMode");
+  // machiningModeOverride is scope:"operation" (see its property definition -
+  // this is NOT yet confirmed to render anywhere usable in Fusion's UI for
+  // this post/version). "default" means this operation follows the post-wide
+  // machiningMode property below; anything else overrides it for just this
+  // operation.
+  var overrideProp = getProperty("machiningModeOverride");
+  var modeProp = (overrideProp && overrideProp != "default") ? overrideProp : getProperty("machiningMode");
   if (modeProp == "off") {
     return;
   }
@@ -3445,7 +3513,88 @@ function writeEasysetProbeBlock(nWord) {
 }
 
 /*
-  O9012 required calling N-word per cycle (N-word = branch # x 10):
+  Calls the underlying Inspection Plus macro (O9511, RENISHAW XYZ MEASURE)
+  directly for a single-surface probe, instead of going through G170/O9012
+  (RENISHAW EASYSET).
+
+  Confirmed via a public forum thread (eMastercam, "Renishaw Easyset
+  cycles", and corroborated by practicalmachinist.com thread 382013):
+  EasySet is a thin, one-shot wrapper meant for a human jogging the probe
+  and triggering ONE measurement from MDI - "The Easyset macros use the
+  inspection plus macros on the back end... adds a simple MDI one line
+  execution of inspection plus routines." It was never designed to be
+  re-entered automatically multiple times in one program. That matches
+  every symptom of Makino alarm 320000 exactly: works on the first probe
+  activation in a program, fails on every automated subsequent one
+  regardless of cycle type or order, unaffected by dwells or cancel/rearm
+  M-codes, and never fails in single-block - because an operator pressing
+  cycle-start between every block recreates the manual/MDI-paced trigger
+  pattern EasySet expects. The documented fix is to call the lower-level
+  Inspection Plus macros directly for multiple sequential probe cycles,
+  which is what this function does for the single-surface probe types.
+
+  Traced directly against O9012's own N11/N13/N16 branches (SET SURF
+  X/Y/Z) to replicate what it does after computing its own target:
+    - O9012 computes its target from CURRENT POSITION +/- a fixed
+      standoff (#5041+-#30) - a rough default appropriate for "jog close,
+      then measure", not the actual CAD-nominal position. We have the
+      real nominal touch coordinate from Fusion (the same value already
+      used to compute the protected approach), so we pass that directly
+      instead - this is more correct for programmed/automated probing,
+      not just a substitution.
+    - O9012 never passes S to O9511 - #19 is undefined inside O9511's
+      (and O9401's, since O9401 is called via M98 sharing scope) local
+      variables, so O9401's own conditional offset write is skipped.
+      O9012 compensates with its own explicit follow-up call
+      (G65P9432S#19W1.<axis>1.) after O9511 returns, using the axis
+      error O9511 left in the shared common variables (#140/#141/#142
+      for X/Y/Z). This function does the same follow-up call.
+    - O9012 does not pass Q; it defaults #17 to #27*#129 (10 in inch
+      mode - confirmed this machine runs in inch/G20). We pass that same
+      default explicitly rather than relying on O9511 defaulting it
+      (which it does not do - Q would reach the touch sub-macro as 0/
+      undefined if omitted).
+    - O9511 determines search direction itself, from the sign of
+      (target - current position) at call time - not from a separate
+      N50-vs-N60-style selector. As long as the protected approach put
+      the probe on the correct side (which it already does, unchanged),
+      no direction argument is needed here.
+    - This intentionally does NOT pass U/H/M/T tolerance words - O9401's
+      tolerance checks are already unused today (none of these reach it
+      via G170 either), so behavior there is unchanged by this switch;
+      wiring up real tolerance checking is a separate, tracked gap.
+
+  Scoped to single-surface probes (probing-x/-y/-z) only - the cycle
+  types actually exercised by the alarm 320000 testing. Bore/boss/
+  pocket/web/corner/etc. still go through G170/O9012 and would need
+  their own, more involved translation (O9012 accumulates multiple
+  O9511/O9512/etc. results into #140/#141/#142 before one final
+  G65P9432 call) - not attempted here.
+*/
+function writeInspectionPlusSurfaceProbe(axisLetter, target, cycle) {
+  var macroCall = settings.probing.macroCall;
+  // O9401 (called internally by O9511 via M98) checks size error against H:
+  // "IF[ABS[#143]LT#11]GOTO.." / else "#149=500(OUT OF TOL)" - an alarm, which
+  // matches Fusion's own "Wrong Size Action: STOP-MESSAGE" for this operation,
+  // confirmed via a real cycle property dump (cycle.hasSizeTolerance=1,
+  // cycle.toleranceSize=0.04, cycle.wrongSizeAction="STOP-MESSAGE"). For a flat
+  // surface probe #143 (SIZE ERROR) reduces to measured-minus-nominal along the
+  // probed axis (no D-word/size-offset register is passed), i.e. exactly the
+  // position deviation Fusion's "Size (upper/lower)" tolerance is checking.
+  // cycle.hasPositionalTolerance was 0 in that same test, so the field name for
+  // an actual positional-tolerance value (which would map to O9401's M word) is
+  // not yet confirmed - do not guess it; get another cycle dump when a probe
+  // operation with positional tolerance enabled needs to be wired up.
+  var hWord = cycle && cycle.hasSizeTolerance ? "H" + xyzFormat.format(cycle.toleranceSize) : "";
+  writeBlock(macroCall, "P9511", axisLetter + xyzFormat.format(target), "Q" + xyzFormat.format(10), hWord);
+  writeBlock(macroCall, "P9432", getMakinoWCS(), "W1.", axisLetter + "1.");
+}
+
+/*
+  O9012 required calling N-word per cycle (N-word = branch # x 10). NOTE:
+  probing-x/-y/-z (single surface) no longer go through G170/O9012 at all -
+  see writeInspectionPlusSurfaceProbe() - so N50/N60/N70/N80/N90 below are
+  listed for reference only and are no longer forced by this post:
     N10  BORE                  (D, no Z)
     N20  BOSS                  (D + Z)
     N30  X/Y POCKET            (X or Y, no Z)
@@ -3464,6 +3613,7 @@ function writeEasysetProbeBlock(nWord) {
   Fusion probing strategies with this post without verifying the actual
   approach direction needed on the machine first.
 */
+
 function writeProbeCycle(cycle, x, y, z, P, F) {
   if (isProbeOperation()) {
     if (!settings.workPlaneMethod.useTiltedWorkplane && !isSameDirection(currentSection.workPlane.forward, new Vector(0, 0, 1))) {
@@ -3489,7 +3639,17 @@ function writeProbeCycle(cycle, x, y, z, P, F) {
         inspectionVariables.pointNumber += 1;
       }
     }
-    protectedProbeMove(cycle, x, y, z);
+    // Do NOT call protectedProbeMove(cycle, x, y, z) here. Every case below already
+    // calls protectedProbeMove() with its own (closer) target immediately before its
+    // G170 block, and G65 P9510 (O9510) protects its ENTIRE commanded travel via G31,
+    // not just the final few inches - so this extra leading call added zero collision
+    // protection. What it did add: a second, fully redundant probe-interface handshake
+    // (O9510 -> O9424 -> M966/dwell/status-poll, retried up to 4x) on every single probe
+    // point. Confirmed on the real machine as the cause of Makino alarm 320000 (probe
+    // communication error) - occurring with nothing near the part, i.e. not a genuine
+    // near-collision (that would be O9510's own PATH OBSTRUCTED, #3000=86 via O9400,
+    // not this). Halving the handshake calls per point removes this without reducing
+    // protection: the remaining per-case call still covers the full approach.
   }
 
   switch (cycleType) {
@@ -3500,15 +3660,15 @@ function writeProbeCycle(cycle, x, y, z, P, F) {
   // than silently emitting a wrong-direction move (see approach()'s validate).
   case "probing-x":
     protectedProbeMove(cycle, x, y, z - cycle.depth);
-    writeEasysetProbeBlock(approach(cycle.approach1) > 0 ? 50 : 60, "G170", "X" + xyzFormat.format(0), getMakinoWCS());
+    writeInspectionPlusSurfaceProbe("X", x, cycle);
     break;
   case "probing-y":
     protectedProbeMove(cycle, x, y, z - cycle.depth);
-    writeEasysetProbeBlock(approach(cycle.approach1) > 0 ? 70 : 80, "G170", "Y" + xyzFormat.format(0), getMakinoWCS());
+    writeInspectionPlusSurfaceProbe("Y", y, cycle);
     break;
   case "probing-z":
     protectedProbeMove(cycle, x, y, Math.min(z - cycle.depth + cycle.probeClearance, cycle.retract));
-    writeEasysetProbeBlock(90, "G170", "Z" + xyzFormat.format(0), getMakinoWCS());
+    writeInspectionPlusSurfaceProbe("Z", z - cycle.depth, cycle);
     break;
   // ── Webs (external walls, X/Y + Z) ──────────────────────────────────────────
   case "probing-x-wall":
@@ -3665,6 +3825,16 @@ function approach(value) {
 }
 // <<<<< INCLUDED FROM include_files/probeCycles_renishaw.cpi
 // Makino EasySet WCS: S1=G54, S2=G55, S3=G56, etc.
+// G170/O9012 has no "check tolerance only, touch nothing" mode - every valid S
+// (0-400) writes into a real register. Confirmed on the real machine: omitting
+// S defaults to S1 and overwrites G54; S0 writes into the EXT/common offset
+// (caused a Z+ overtravel). So a probe operation with no WCS to update (e.g.
+// Probe Geometry / feature-tolerance inspection) is instead pointed at
+// inspectionScratchWorkOffset - a work offset dedicated to catching these
+// writes, which must never be used for actual part machining on this machine.
+// The tolerance check/alarm itself (O9401) runs and can stop the program
+// before this write happens either way, so this does not weaken that check -
+// it only decides which otherwise-unused register absorbs the side effect.
 function getMakinoWCS() {
   if (currentSection.strategy == "probe") {
     var nextWorkOffset = hasNextSection() ? getNextSection().workOffset == 0 ? 1 : getNextSection().workOffset : -1;
@@ -3673,7 +3843,7 @@ function getMakinoWCS() {
     }
     return "S" + currentSection.probeWorkOffset;
   }
-  return "";
+  return "S" + getProperty("inspectionScratchWorkOffset");
 }
 
 // Corner number from approach directions: B1=Lower-Left, B2=Upper-Left, B3=Upper-Right, B4=Lower-Right
@@ -3685,19 +3855,68 @@ function getMakinoCorner(approach1, approach2) {
   if (ax < 0 && ay > 0) { return 2; } // Upper Left
   return 1;                            // Lower Left
 }
-// Makino: position moves use standard G00 — G170 handles probe protection internally
+/*
+  G170/O9012 (Renishaw EasySet) only starts monitoring the stylus once its own
+  block executes - it does not protect the moves that bring the probe close to
+  the part beforehand. Those moves are made protected here instead, via G65
+  P9510 - confirmed present on this machine's control as O9510 "RENISHAW
+  PROTECTED POSN": it drives the move with the G31 skip function and checks
+  the stopping position against the programmed target, alarming #3000=86
+  PATH OBSTRUCTED (see O9400) if the stylus trips early instead of letting the
+  probe crash through at rapid.
+*/
 function protectedProbeMove(_cycle, x, y, z) {
+  // O9510 reads F as a macro argument (#9), not a true modal register - it is
+  // only carried over between calls through its own internal fallback (#117),
+  // which is set from a previous P9510 call. Force the F word on every call so
+  // it is never silently dropped by feedOutput's own modal suppression.
+  if (getProperty("forceToolChangeBeforeEachProbePoint")) {
+    // Test for alarm 320000: M965 alone (see below) did not fix a second probe
+    // cycle failing in the same program. Forcing an M06 tool change to the SAME
+    // tool before every probe point is a much heavier reset than M965 or a dwell -
+    // it goes through the machine's real tool-change sequence (which this post
+    // already relies on elsewhere, e.g. onSection's normal tool change and the
+    // next-tool preload T-call) instead of guessing at what specifically needs
+    // to be cleared. This is a diagnostic test, not a confirmed fix - verify on
+    // the machine, and if it works, we can narrow it down to only the points
+    // that actually need it rather than every point.
+    writeToolBlock("T" + toolFormat.format(tool.number), mFormat.format(6));
+  }
+  // M965 is the machine's own, already-used "CANCEL M966" code (see O9424 and
+  // O9012's own ending sequence) - M966 is what actually arms the probe interface.
+  // Confirmed on the real machine: alarm 320000 hits the second probe cycle in a
+  // program (any cycle type, not just a specific one), never the first. It did NOT
+  // clear no matter how long the machine sat at an inserted M0 between the two
+  // cycles, and M965 alone (above) did not fix it either. But it does NOT happen
+  // at all in single-block mode - only in continuous/auto. That points away from
+  // "needs more real time to pass" (M0 already ruled that out) and toward a block-
+  // overlap/look-ahead issue: in continuous mode the control can start preparing/
+  // running the next block before an M-code's completion (M965, the forced M06
+  // above, or M966 inside O9424) is actually confirmed back from the PMC; single-
+  // block's forced stop-and-restart between every block happens to guarantee that
+  // confirmation, which is exactly the kind of gap a dwell placed AFTER the
+  // M-codes (not before, like probeHandshakeSettleDwell was originally placed)
+  // should paper over. See the property description for how to test this.
+  writeBlock(mFormat.format(965));
+  var settleDwell = getProperty("probeHandshakeSettleDwell");
+  if (settleDwell > 0) {
+    onDwell(settleDwell); // forces a real gap between the M-codes above and the protected move below
+  }
+  var macroCall = settings.probing.macroCall;
   var _x = xOutput.format(x);
   var _y = yOutput.format(y);
   var _z = zOutput.format(z);
   if (_z && z >= getCurrentPosition().z) {
-    writeBlock(gMotionModal.format(0), _z);
+    forceFeed();
+    writeBlock(macroCall, "P9510", _z, getFeed(_cycle.feedrate)); // protected positioning move
   }
   if (_x || _y) {
-    writeBlock(gMotionModal.format(0), _x, _y);
+    forceFeed();
+    writeBlock(macroCall, "P9510", _x, _y, getFeed(highFeedrate)); // protected positioning move
   }
   if (_z && z < getCurrentPosition().z) {
-    writeBlock(gMotionModal.format(0), _z);
+    forceFeed();
+    writeBlock(macroCall, "P9510", _z, getFeed(_cycle.feedrate)); // protected positioning move
   }
 }
 // >>>>> INCLUDED FROM include_files/setProbeAngle_fanuc.cpi

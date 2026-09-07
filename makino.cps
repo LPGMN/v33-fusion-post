@@ -10,7 +10,8 @@
   FORKID {97D024CD-3FC3-4161-8BA2-06EA3E072945}
 
   CHANGELOG:
-  V1.6.5 - 2026-08-23 - IAL: Added per-operation override for machining mode (M250/M251/M252). setMachiningMode() now checks for a custom post parameter named "machiningMode" on the current operation first (Fusion's Post Process / custom post parameters, set per-operation, not this post's own property dialog) - if present, it takes the same values as the post-wide machiningMode property (off/250/251/252/auto) and overrides that property for just that operation. An operation with no such parameter set falls back to the post-wide property exactly as before.
+  V1.6.6 - 2026-08-23 - IAL: V1.6.5's per-operation machining mode override used a custom post parameter ("machiningMode") that turned out not to correspond to anything visible in Fusion's UI (checked against the NC Program post-properties dialog, which only ever shows the post-wide property, as expected - custom per-operation post parameters are not exposed there and were never actually confirmed to exist as a UI affordance). Replaced with the standard Autodesk mechanism for this: a new machiningModeOverride property with scope:"operation" (previously every property in this post was scope:"post") instead of a guessed parameter name. This is NOT yet confirmed to render anywhere usable either - check the operation's own dialog after re-posting. If it doesn't show up anywhere usable, per-operation control needs a different mechanism entirely and this should not be relied on yet.
+  V1.6.5 - 2026-08-23 - IAL: Added per-operation override for machining mode (M250/M251/M252), see V1.6.6 - the parameter-based mechanism here did not work as described.
   V1.6.4 - 2026-08-23 - IAL: Confirmed via the V1.6.3 cycle property dump on a real Probe Geometry (Z surface) operation: cycle.hasSizeTolerance, cycle.toleranceSize (0.04, matching the operation's "Size upper/lower" = +/-0.04 in), and cycle.wrongSizeAction ("STOP-MESSAGE"). Wired up real size-tolerance checking: writeInspectionPlusSurfaceProbe() now sends H<toleranceSize> to G65 P9511 when cycle.hasSizeTolerance is set, so O9401's real check runs (alarms "500 OUT OF TOL" if exceeded) instead of being silently skipped - closes the "just setting an offset, not comparing anything" gap for probing-x/-y/-z. cycle.hasPositionalTolerance was 0 in the same test, so the field name for an actual positional-tolerance value (O9401's M word) is still unconfirmed - not guessed, left for a future dump when a probe op with positional tolerance enabled needs it. Removed the V1.6.3 diagnostic dump now that the needed field names are confirmed.
   V1.6.3 - 2026-08-23 - IAL: TEMPORARY diagnostic build - added dumpCycleForToleranceDiscovery(), called from the probing-x/-y/-z cases, which writes every property actually present on the Fusion `cycle` object as G-code comments. Purpose: the Probe Geometry operation's "Feature Tolerances" (Size upper/lower) are visible in Fusion's own UI, but the real `cycle` property name used to pass those values to this post is not documented anywhere available here - guessing at a name risks silently reading undefined and posting with no tolerance enforced while looking correct (the same failure mode as the earlier S0 incident). Re-post a Probe Geometry operation once with this build and read the property names/values out of the comments to confirm the real field before wiring up real tolerance checking. Remove the dump and its call sites once that's done - not meant to ship long-term.
   V1.6.2 - 2026-08-23 - IAL: V1.6.1 (useSmoothing default to Automatic) exposed a latent bug in setSmoothing(): it emitted "G05.1 Q2 R<level>" (confirmed on the real machine as the exact line, "G05.1 Q2 R4", that immediately alarmed "IMPROPER G CODE"). This syntax was previously dead code since smoothing defaulted to Off. The machine's own resident macros (O9510/O9511) actively run G05.1 successfully on this exact control using only Q0 (off) and Q1 (on, no level word) - never Q2, never an R-level. setSmoothing() now emits that proven Q1/Q0 form unconditionally; the Level 1-10/Automatic property choices no longer affect the emitted code, since this control does not appear to support a specified smoothing level via G05.1.
@@ -36,7 +37,7 @@
   V1.3.1 - 2026-03-09 - IAL: Added M77 air-through-tool coolant support
 */
 
-description = "Makino V33 3-axis V1.6.5";
+description = "Makino V33 3-axis V1.6.6";
 vendor = "Makino";
 vendorUrl = "https://www.makino.com/";
 legal = "Copyright (C) 2012-2026 by Autodesk, Inc.";
@@ -166,7 +167,7 @@ properties = {
   },
   machiningMode: {
     title      : "Machining mode",
-    description: "Selects the Makino machining mode M-code output. M251=High Efficiency/High Performance (roughing), M250=High Accuracy/General (machine default on power-on or reset), M252=Super-High Accuracy (finishing). 'Automatic' selects based on stock-to-leave per operation. This is the post-wide default - to override it for one specific operation, add a custom post parameter named 'machiningMode' on that operation (Fusion's Post Process / custom post parameters, not this property dialog) with the same values (off/250/251/252/auto); an operation with that parameter set ignores this property entirely.",
+    description: "Selects the Makino machining mode M-code output. M251=High Efficiency/High Performance (roughing), M250=High Accuracy/General (machine default on power-on or reset), M252=Super-High Accuracy (finishing). 'Automatic' selects based on stock-to-leave per operation. This is the post-wide default - see machiningModeOverride to set this per-operation instead.",
     group      : "preferences",
     type       : "enum",
     values     : [
@@ -178,6 +179,22 @@ properties = {
     ],
     value: "off",
     scope: "post"
+  },
+  machiningModeOverride: {
+    title      : "Machining mode (this operation)",
+    description: "Per-operation override for Machining mode above. 'Use post default' (the default) means this operation follows the post-wide Machining mode property; any other choice here overrides it for this operation only. NOT YET CONFIRMED where Fusion renders an operation-scoped ('scope: operation') property in its UI for this Fusion version - check the operation's own dialog after re-posting to see if this control shows up there; if it doesn't appear anywhere usable, this needs a different mechanism and should not be relied on yet.",
+    group      : "preferences",
+    type       : "enum",
+    values     : [
+      {title:"Use post default", id:"default"},
+      {title:"Off (no output)", id:"off"},
+      {title:"M250 - High Accuracy (machine default)", id:"250"},
+      {title:"M251 - High Efficiency / High Performance", id:"251"},
+      {title:"M252 - Super-High Accuracy", id:"252"},
+      {title:"Automatic (by operation type)", id:"auto"}
+    ],
+    value: "default",
+    scope: "operation"
   },
   usePitchForTapping: {
     title      : "Use pitch for tapping",
@@ -1811,13 +1828,13 @@ function getCoolantCodes(coolant, format) {
 var currentMachiningMode = -1; // -1 = unknown/unset; forces output on first operation
 
 function setMachiningMode() {
-  // A per-operation custom post parameter named "machiningMode" (set on the
-  // operation itself, in Fusion's Post Process / custom post parameters -
-  // not the post's own property dialog) overrides the post-wide machiningMode
-  // property for just that operation. Accepts the same values: "off", "250",
-  // "251", "252", or "auto". Leave the operation's parameter unset to fall
-  // back to the post-wide property as before.
-  var modeProp = hasParameter("machiningMode") ? getParameter("machiningMode") : getProperty("machiningMode");
+  // machiningModeOverride is scope:"operation" (see its property definition -
+  // this is NOT yet confirmed to render anywhere usable in Fusion's UI for
+  // this post/version). "default" means this operation follows the post-wide
+  // machiningMode property below; anything else overrides it for just this
+  // operation.
+  var overrideProp = getProperty("machiningModeOverride");
+  var modeProp = (overrideProp && overrideProp != "default") ? overrideProp : getProperty("machiningMode");
   if (modeProp == "off") {
     return;
   }

@@ -10,6 +10,7 @@
   FORKID {97D024CD-3FC3-4161-8BA2-06EA3E072945}
 
   CHANGELOG:
+  V1.6.3 - 2026-08-23 - IAL: TEMPORARY diagnostic build - added dumpCycleForToleranceDiscovery(), called from the probing-x/-y/-z cases, which writes every property actually present on the Fusion `cycle` object as G-code comments. Purpose: the Probe Geometry operation's "Feature Tolerances" (Size upper/lower) are visible in Fusion's own UI, but the real `cycle` property name used to pass those values to this post is not documented anywhere available here - guessing at a name risks silently reading undefined and posting with no tolerance enforced while looking correct (the same failure mode as the earlier S0 incident). Re-post a Probe Geometry operation once with this build and read the property names/values out of the comments to confirm the real field before wiring up real tolerance checking. Remove the dump and its call sites once that's done - not meant to ship long-term.
   V1.6.2 - 2026-08-23 - IAL: V1.6.1 (useSmoothing default to Automatic) exposed a latent bug in setSmoothing(): it emitted "G05.1 Q2 R<level>" (confirmed on the real machine as the exact line, "G05.1 Q2 R4", that immediately alarmed "IMPROPER G CODE"). This syntax was previously dead code since smoothing defaulted to Off. The machine's own resident macros (O9510/O9511) actively run G05.1 successfully on this exact control using only Q0 (off) and Q1 (on, no level word) - never Q2, never an R-level. setSmoothing() now emits that proven Q1/Q0 form unconditionally; the Level 1-10/Automatic property choices no longer affect the emitted code, since this control does not appear to support a specified smoothing level via G05.1.
   V1.6.1 - 2026-08-23 - IAL: Defaulted useSmoothing to Automatic (was Off) - confirmed on the real machine that milling without AICC (G05.1) active could not keep up with a dense Adaptive Clearing toolpath (many short segments, tight-radius arcs), causing the tool to overshoot/plunge into the part between linking moves. This was unrelated to any probing work above - onRapid/onLinear (used by Adaptive and all other milling) were never touched by any of it. See useSmoothing's property description for the reasoning and the corroborating evidence from the probe macros' own G05.1 Q0/Q1 usage.
   V1.6.0 - 2026-08-23 - IAL: Found the real root cause of Makino alarm 320000 (probe communication error) via a public forum thread (eMastercam, "Renishaw Easyset cycles", corroborated by practicalmachinist.com thread 382013): G170/O9012 (RENISHAW EASYSET) is a thin, one-shot wrapper meant for a human jogging the probe and triggering ONE measurement from MDI - "the Easyset macros use the inspection plus macros on the back end... adds a simple MDI one line execution of inspection plus routines" - it was never designed to be re-entered automatically multiple times in one program. That matches every symptom seen: works on the first probe activation, fails on every automated subsequent one regardless of cycle type/order, unaffected by dwells (1s and 15s) or M965/forced-toolchange mitigations, and never fails in single-block (operator-paced stepping recreates the manual/MDI trigger pattern EasySet expects).
@@ -33,7 +34,7 @@
   V1.3.1 - 2026-03-09 - IAL: Added M77 air-through-tool coolant support
 */
 
-description = "Makino V33 3-axis V1.6.2";
+description = "Makino V33 3-axis V1.6.3";
 vendor = "Makino";
 vendorUrl = "https://www.makino.com/";
 legal = "Copyright (C) 2012-2026 by Autodesk, Inc.";
@@ -3574,6 +3575,31 @@ function writeInspectionPlusSurfaceProbe(axisLetter, target) {
   Fusion probing strategies with this post without verifying the actual
   approach direction needed on the machine first.
 */
+
+/*
+  TEMPORARY diagnostic - not a permanent feature. The Fusion "Probe Geometry"
+  operation's Feature Tolerances (Size upper/lower) are visible in its own UI,
+  but the actual `cycle` property name Fusion uses to pass those values to
+  this post is not something we can safely guess - a wrong guess here would
+  silently read undefined and post with no tolerance enforced while looking
+  correct, the same failure mode as the earlier S0 incident. This dumps every
+  property actually present on `cycle` as G-code comments so the real field
+  name(s) can be read directly off a single re-post, instead of guessed.
+  Remove this (and its call sites in the probing-x/-y/-z cases) once the real
+  property names for the tolerance values are confirmed and wired in properly.
+*/
+function dumpCycleForToleranceDiscovery(cycle) {
+  writeComment("--- cycle property dump (tolerance discovery, remove after use) ---");
+  for (var key in cycle) {
+    try {
+      writeComment(key + " = " + cycle[key]);
+    } catch (e) {
+      writeComment(key + " = <unreadable>");
+    }
+  }
+  writeComment("--- end cycle property dump ---");
+}
+
 function writeProbeCycle(cycle, x, y, z, P, F) {
   if (isProbeOperation()) {
     if (!settings.workPlaneMethod.useTiltedWorkplane && !isSameDirection(currentSection.workPlane.forward, new Vector(0, 0, 1))) {
@@ -3619,14 +3645,17 @@ function writeProbeCycle(cycle, x, y, z, P, F) {
   // surface-probe post - if wrong, Fusion errors at generation time rather
   // than silently emitting a wrong-direction move (see approach()'s validate).
   case "probing-x":
+    dumpCycleForToleranceDiscovery(cycle);
     protectedProbeMove(cycle, x, y, z - cycle.depth);
     writeInspectionPlusSurfaceProbe("X", x);
     break;
   case "probing-y":
+    dumpCycleForToleranceDiscovery(cycle);
     protectedProbeMove(cycle, x, y, z - cycle.depth);
     writeInspectionPlusSurfaceProbe("Y", y);
     break;
   case "probing-z":
+    dumpCycleForToleranceDiscovery(cycle);
     protectedProbeMove(cycle, x, y, Math.min(z - cycle.depth + cycle.probeClearance, cycle.retract));
     writeInspectionPlusSurfaceProbe("Z", z - cycle.depth);
     break;

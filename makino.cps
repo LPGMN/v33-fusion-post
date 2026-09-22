@@ -10,7 +10,6 @@
   FORKID {97D024CD-3FC3-4161-8BA2-06EA3E072945}
 
   CHANGELOG:
-  V1.5.0 - 2026-09-22 - IAL: Added table cleanoff chip fan soft-start (chipFanToolNumber/chipFanStartRPM/chipFanRampDwell properties) - when the configured spindle-mounted fan tool is loaded, COMMAND_START_SPINDLE ramps RPM (start RPM -> dwell -> programmed RPM) instead of jumping straight to speed.
   V1.4.1 - 2026-08-22 - IAL: Restored next-tool preload T-call on regular tool changes (COMMAND_LOAD_TOOL) - this is a required part of the post, not the source of the V1.3.2 issue; V1.3.2's removal was based on a misdiagnosis.
   V1.4.0 - 2026-08-21 - IAL: Fixed G170/O9012 EasySet probing - N-word was left to the auto sequence counter instead of being forced per cycle, causing FORMAT ERROR alarms or wrong probing cycles (see writeEasysetProbeBlock). Also forced M250 for all probe operations regardless of machiningMode.
   V1.3.3 - 2026-05-24 - IAL: Restored touchoff block; preload T-call kept inside touchoff loop only (needed for ATC sequencing), removed from regular tool changes
@@ -18,7 +17,7 @@
   V1.3.1 - 2026-03-09 - IAL: Added M77 air-through-tool coolant support
 */
 
-description = "Makino V33 3-axis V1.5.0";
+description = "Makino V33 3-axis V1.4.1";
 vendor = "Makino";
 vendorUrl = "https://www.makino.com/";
 legal = "Copyright (C) 2012-2026 by Autodesk, Inc.";
@@ -167,30 +166,6 @@ properties = {
     group      : "preferences",
     type       : "boolean",
     value      : false,
-    scope      : "post"
-  },
-  chipFanToolNumber: {
-    title      : "Chip fan tool number",
-    description: "Tool number of the spindle-mounted table cleanoff/chip fan (8in). Set to 0 to disable. When this tool is loaded, spindle start is replaced with a soft-start ramp (start RPM, dwell, then programmed RPM) instead of jumping directly to the programmed speed, to avoid shocking the fan.",
-    group      : "preferences",
-    type       : "integer",
-    value      : 0,
-    scope      : "post"
-  },
-  chipFanStartRPM: {
-    title      : "Chip fan start RPM",
-    description: "Initial spindle speed used to soft-start the chip fan tool before ramping to the programmed RPM. Only applies when 'Chip fan tool number' is set.",
-    group      : "preferences",
-    type       : "integer",
-    value      : 3000,
-    scope      : "post"
-  },
-  chipFanRampDwell: {
-    title      : "Chip fan ramp dwell (sec)",
-    description: "Dwell time, in seconds, between the chip fan's start RPM and its ramp-up to the programmed RPM. Only applies when 'Chip fan tool number' is set.",
-    group      : "preferences",
-    type       : "number",
-    value      : 3,
     scope      : "post"
   },
   rotaryTableAxis: {
@@ -729,15 +704,7 @@ function onCommand(command) {
     return;
   case COMMAND_START_SPINDLE:
     forceSpindleSpeed = false;
-    var chipFanToolNumber = getProperty("chipFanToolNumber");
-    if (chipFanToolNumber > 0 && tool.number == chipFanToolNumber) {
-      writeComment("TABLE CLEANOFF - CHIP FAN SOFT START");
-      writeBlock(sOutput.format(getProperty("chipFanStartRPM")), mFormat.format(tool.clockwise ? 3 : 4));
-      onDwell(getProperty("chipFanRampDwell"));
-      writeBlock(sOutput.format(spindleSpeed));
-    } else {
-      writeBlock(sOutput.format(spindleSpeed), mFormat.format(tool.clockwise ? 3 : 4));
-    }
+    writeBlock(sOutput.format(spindleSpeed), mFormat.format(tool.clockwise ? 3 : 4));
     return;
   case COMMAND_LOAD_TOOL:
     writeToolBlock("T" + toolFormat.format(tool.number), mFormat.format(6));

@@ -90,6 +90,14 @@ properties = {
     value      : true,
     scope      : "post"
   },
+  useM99AtProgramEnd: {
+    title      : "Use M99 at program end",
+    description: "Ends the program with M99 instead of M30.",
+    group      : "preferences",
+    type       : "boolean",
+    value      : false,
+    scope      : "post"
+  },
   separateWordsWithSpace: {
     title      : "Separate words with space",
     description: "Adds spaces between words if 'yes' is selected.",
@@ -804,7 +812,11 @@ function onClose() {
     onCommand(COMMAND_STOP_SPINDLE);
     writeToolBlock("T" + toolFormat.format(firstTool.number), mFormat.format(6));
   }
-  writeBlock(mFormat.format(30)); // stop program, spindle stop, coolant off
+  if (getProperty("useM99AtProgramEnd")) {
+    writeBlock(mFormat.format(99)); // return from program
+  } else {
+    writeBlock(mFormat.format(30)); // stop program, spindle stop, coolant off
+  }
   if (subprogramsAreSupported()) {
     writeSubprograms();
   }
